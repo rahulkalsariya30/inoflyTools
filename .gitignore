@@ -1,0 +1,79 @@
+# =============================================================
+# CRITICAL: Private keys must NEVER be committed
+# =============================================================
+pki/manufacturer/private/
+pki/cb/private/
+*.pem
+*.key
+*.p12
+*.pfx
+
+# But DO track public keys and certificates
+!pki/manufacturer/public/
+!pki/cb/public/
+!*.pub
+!*.crt
+!*.cer
+
+# =============================================================
+# Python
+# =============================================================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# =============================================================
+# PX4 build artifacts (build inside WSL, not tracked here)
+# =============================================================
+firmware/build/
+*.px4
+*.elf
+*.bin
+*.hex
+*.map
+
+# =============================================================
+# QGroundControl build artifacts
+# =============================================================
+qgroundcontrol/build/
+qgroundcontrol/.qt/
+
+# =============================================================
+# Signed firmware bundles (generated artifacts, not source)
+# =============================================================
+*.sfb
+*.signed
+
+# =============================================================
+# Secrets and environment
+# =============================================================
+.env
+*.secret
+secrets/
+
+# =============================================================
+# OS / Editor
+# =============================================================
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# =============================================================
+# Logs and test output
+# =============================================================
+*.log
+tests/output/
