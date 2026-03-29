@@ -42,10 +42,15 @@ PRIVATE_KEY_PATH = PROJECT_ROOT / "pki" / "manufacturer" / "private" / "manufact
 PUBLIC_KEY_PATH  = PROJECT_ROOT / "pki" / "manufacturer" / "public"  / "manufacturer_public.pem"
 
 # SITL storage: PX4_STORAGEDIR = "." relative to where PX4 is launched from.
-# When running: cd ~/PX4-Autopilot/build/px4_sitl_default && PX4_SIM_MODEL=shell ./bin/px4 ...
-# the manifest path is ./inofly/manifest.bin inside that directory.
+#
+# PX4 uses different working directories depending on how SITL is launched:
+#   - Headless (PX4_SIM_MODEL=shell): CWD = build/px4_sitl_default/
+#   - Gazebo (make gazebo-classic_iris): CWD = build/px4_sitl_default/rootfs/
+#
+# We provision both so the script works regardless of which mode is used.
 SITL_BUILD_DIR   = Path.home() / "PX4-Autopilot" / "build" / "px4_sitl_default"
 SITL_MANIFEST    = SITL_BUILD_DIR / "inofly" / "manifest.bin"
+SITL_MANIFEST_ROOTFS = SITL_BUILD_DIR / "rootfs" / "inofly" / "manifest.bin"
 
 # ── Test manifest data ─────────────────────────────────────────────────────
 #
@@ -104,10 +109,12 @@ def main():
 
     print("      [OK] CRC and ECDSA signature verified")
 
-    # Step 3: Write to SITL storage
+    # Step 3: Write to SITL storage (both headless and Gazebo paths)
     print(f"\n[3/3] Writing to SITL storage...")
     save_binary_manifest(binary, SITL_MANIFEST)
-    print(f"      [OK] Manifest written to: {SITL_MANIFEST}")
+    print(f"      [OK] Headless path: {SITL_MANIFEST}")
+    save_binary_manifest(binary, SITL_MANIFEST_ROOTFS)
+    print(f"      [OK] Gazebo path:   {SITL_MANIFEST_ROOTFS}")
 
     print("\n" + "=" * 60)
     print("Provisioning complete.")
