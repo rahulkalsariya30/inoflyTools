@@ -102,44 +102,44 @@ firmware must be rejected at the drone level (not just at the QGC level).
 | 2.5 | POST001 | SITL end-to-end integration test |
 | 2.6 | ARM001  | Arming check: block if POST failed |
 
-### Phase 3 — Compliance Test Suite ⏳ Next
+### Phase 3 — QGC Secure Firmware Plugin ⏳ Next
 | Sub-phase | Req ID | Description |
 |-----------|--------|-------------|
-| 3.1 | POST001 | Integration test: POST pass/fail scenarios |
-| 3.2 | ARM001  | Integration test: arming blocked/cleared |
-| 3.3 | POST004 | Implement + test board ID verification |
-| 3.4 | POST002/003 | SITL stub tests + NuttX TODO documentation |
-| 3.5 | ALL    | Full compliance report generation |
+| 3.1 | POST001/ARM001 | Security status panel (live firmware_integrity_status) |
+| 3.2 | PKG001/UPD001  | Secure firmware update UI (upload + verify .fwbundle) |
+| 3.3 | LOG001         | Audit log viewer (real-time feed + full download) |
+| 3.4 | UPD001         | Drone-side firmware update signature rejection |
 
-### Phase 4 — QGC Secure Firmware Plugin ⏳ Planned
+### Phase 4 — Hardware Root of Trust ⏳ Planned
 | Sub-phase | Req ID | Description |
 |-----------|--------|-------------|
-| 4.1 | POST001/ARM001 | Security status panel (live firmware_integrity_status) |
-| 4.2 | PKG001/UPD001  | Secure firmware update UI (upload + verify .fwbundle) |
-| 4.3 | LOG001         | Audit log viewer (real-time feed + full download) |
-| 4.4 | UPD001         | Drone-side firmware update signature rejection |
+| 4.1 | ROT001 | TPM 2.0 integration (replace software key) |
+| 4.2 | POST002/003 | Real code + data hash verification on NuttX hardware |
+| 4.3 | LOG001 | Audit log entries signed with TPM key |
 
-### Phase 5 — Hardware Root of Trust ⏳ Planned
+### Phase 5 — Parameter Protection ⏳ Planned
 | Sub-phase | Req ID | Description |
 |-----------|--------|-------------|
-| 5.1 | ROT001 | TPM 2.0 integration (replace software key) |
-| 5.2 | POST002/003 | Real code + data hash verification on NuttX hardware |
-| 5.3 | LOG001 | Audit log entries signed with TPM key |
+| 5.1 | PAR001 | Define protected parameter list |
+| 5.2 | PAR001 | PX4 parameter write intercept |
+| 5.3 | PAR001 | Signature verification on protected param writes |
+| 5.4 | PAR001 | Tests + compliance mapping |
 
-### Phase 6 — Parameter Protection ⏳ Planned
+### Phase 6 — Compliance Test Suite ⏳ Final
 | Sub-phase | Req ID | Description |
 |-----------|--------|-------------|
-| 6.1 | PAR001 | Define protected parameter list |
-| 6.2 | PAR001 | PX4 parameter write intercept |
-| 6.3 | PAR001 | Signature verification on protected param writes |
-| 6.4 | PAR001 | Tests + compliance mapping |
+| 6.1 | POST001 | Integration test: POST pass/fail scenarios |
+| 6.2 | ARM001  | Integration test: arming blocked/cleared |
+| 6.3 | POST004 | Implement + test board ID verification |
+| 6.4 | POST002/003 | SITL stub tests + NuttX TODO documentation |
+| 6.5 | ALL    | Full compliance report generation (DGCA submission) |
 
-### Phase 7 — GCS Authentication ⏳ Future
+### Phase 7 — GCS Authentication ⏳ Skipped (future consideration)
 | Sub-phase | Description |
 |-----------|-------------|
 | 7.1 | MAVLink 2 message signing (shared secret) |
 | 7.2 | GCS pairing — only paired GCS can control drone |
-| 7.3 | Pairing key stored in TPM (requires Phase 5) |
+| 7.3 | Pairing key stored in TPM (requires Phase 4) |
 
 ---
 
