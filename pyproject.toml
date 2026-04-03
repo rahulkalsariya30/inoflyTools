@@ -1,0 +1,29 @@
+[project]
+name = "inofly-security-tools"
+version = "0.1.0"
+description = "DGCA Level 1 firmware security compliance toolkit for UAS"
+requires-python = ">=3.11"
+
+# Pinned dependencies — update deliberately, not accidentally
+dependencies = [
+    "cryptography==46.0.6",
+    "python-docx==1.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.0.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/compliance"]
+markers = [
+    "rot: Root of Trust tests (ROT001, ROT002)",
+    "checksum: Checksum tests (CHK001)",
+    "signing: Signing tests (SIG001)",
+    "bundler: Bundle packaging tests (PKG001)",
+    "provisioning: Provisioning tests (PRV001)",
+]
+
+[tool.pyright]
+pythonVersion = "3.11"
