@@ -3,17 +3,17 @@
 # =============================================================
 pki/manufacturer/private/
 pki/cb/private/
-*.pem
+
+# Block private key file formats — scoped to avoid catching public keys
 *.key
 *.p12
 *.pfx
 
-# But DO track public keys and certificates
-!pki/manufacturer/public/
-!pki/cb/public/
-!*.pub
-!*.crt
-!*.cer
+# Block .pem ONLY in private directories (not globally)
+pki/**/private/**/*.pem
+
+# Public keys and certificates ARE safe to commit
+# (no exclusion needed — they're not ignored)
 
 # =============================================================
 # Python
