@@ -1,0 +1,101 @@
+name: Security Compliance CI
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - 'Docs/**'
+      - '*.md'
+      - 'qgroundcontrol/**'
+  pull_request:
+    branches: [master]
+    paths-ignore:
+      - 'Docs/**'
+      - '*.md'
+      - 'qgroundcontrol/**'
+
+jobs:
+  compliance-tests:
+    name: Compliance Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          pip install cryptography==46.0.6 python-docx==1.2.0 pytest==9.0.2
+
+      - name: Run compliance tests
+        run: |
+          python -m pytest tests/compliance/ -v --tb=short --junitxml=test-results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.xml
+
+  secret-scan:
+    name: Secret Leak Detection
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for private keys in tracked files
+        run: |
+          echo "Checking for private key material in tracked files..."
+          FAIL=0
+
+          # Check for PEM private key headers
+          if git grep -l "BEGIN.*PRIVATE KEY" -- ':(exclude).gitignore' ':(exclude)*.md' ':(exclude)pki/manufacturer/private/README.md' 2>/dev/null; then
+            echo "::error::PRIVATE KEY FOUND in tracked files!"
+            FAIL=1
+          fi
+
+          # Check for common secret patterns
+          if git grep -lE "(AKIA[0-9A-Z]{16}|password\s*=\s*['\"][^'\"]+['\"])" -- '*.py' '*.cpp' '*.h' 2>/dev/null; then
+            echo "::error::Potential secrets found in source files!"
+            FAIL=1
+          fi
+
+          # Verify .pem files in private dirs are NOT tracked
+          if git ls-files 'pki/manufacturer/private/*.pem' 'pki/cb/private/*.pem' | grep -q .; then
+            echo "::error::Private key .pem files are tracked by git!"
+            FAIL=1
+          fi
+
+          if [ "$FAIL" -eq 1 ]; then
+            exit 1
+          fi
+
+          echo "No secrets detected in tracked files."
+
+  pipeline-smoke-test:
+    name: Pipeline Smoke Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          pip install cryptography==46.0.6 pytest==9.0.2
+
+      - name: Run pipeline end-to-end
+        run: |
+          python -m pytest tests/compliance/test_PIPE_pipeline.py -v --tb=short
