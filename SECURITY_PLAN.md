@@ -1,7 +1,7 @@
 # Drone Security Compliance Plan
 # DGCA UAS Type Certification — Level 1 (Firmware Manufacturer)
 
-Last updated: 2026-03-29
+Last updated: 2026-04-12
 
 ---
 
@@ -30,7 +30,7 @@ enforce integrity at boot. We are NOT the Certification Body (CB).
 | ARM001 | Arming blocked if POST failed            | Arming Gate       | ✅ Done        |
 | PAR001 | Compliance parameter protection          | Param Protection  | ❌ Not started |
 | LOG001 | Signed audit log — signed with device RoT key | Audit Logging | ❌ Not started |
-| UPD001 | Drone rejects unsigned firmware update   | Secure Update     | ❌ Not started |
+| UPD001 | Drone rejects unsigned firmware update   | Secure Update     | ✅ Done        |
 
 ---
 
@@ -140,13 +140,13 @@ firmware must be rejected at the drone level (not just at the QGC level).
 | 2.5 | POST001 | SITL end-to-end integration test |
 | 2.6 | ARM001  | Arming check: block if POST failed |
 
-### Phase 3 — QGC Secure Firmware Plugin ⏳ Next
-| Sub-phase | Req ID | Description |
-|-----------|--------|-------------|
-| 3.1 | POST001/ARM001 | Security status panel (live firmware_integrity_status) |
-| 3.2 | PKG001/UPD001  | Secure firmware update UI (upload + verify .fwbundle) |
-| 3.3 | LOG001         | Audit log viewer (real-time feed + full download) |
-| 3.4 | UPD001         | Drone-side firmware update signature rejection |
+### Phase 3 — QGC Secure Firmware Plugin ⏳ In Progress
+| Sub-phase | Req ID | Description | Status |
+|-----------|--------|-------------|--------|
+| 3.1 | POST001/ARM001 | Security status panel (live firmware_integrity_status) | ✅ Done |
+| 3.2 | PKG001/UPD001  | Secure firmware update UI (upload + verify .fwbundle) | ✅ Done |
+| 3.3 | LOG001         | Audit log viewer (real-time feed + full download) | ⏳ Next |
+| 3.4 | UPD001         | Drone-side firmware update signature rejection | ✅ Done |
 
 ### Phase 4 — Hardware Root of Trust ⏳ Planned (Level 1 Required)
 | Sub-phase | Req ID | Description |
@@ -193,7 +193,7 @@ firmware must be rejected at the drone level (not just at the QGC level).
 | Board ID not verified at POST | POST004 | Medium | Possibly |
 | No parameter protection | PAR001 | High | Yes |
 | No audit logging on drone | LOG001 | High | Yes (depends on DEV001) |
-| Drone doesn't reject unsigned firmware | UPD001 | High | Yes |
+| ~~Drone doesn't reject unsigned firmware~~ | UPD001 | ~~High~~ | ✅ Resolved |
 | GCS authentication | Phase 7 | Medium | No (Level 1) |
 
 ---
@@ -254,6 +254,7 @@ inoflyPilot (PX4 fork — WSL2):
   src/modules/secure_boot/
     secure_boot_main.cpp
     FirmwareIntegrityChecker.hpp/.cpp
+    FirmwareUpdateGatekeeper.hpp/.cpp
     manufacturer_pubkey.h
     security_manifest.h
   src/modules/mavlink/streams/
@@ -262,6 +263,7 @@ inoflyPilot (PX4 fork — WSL2):
     firmwareIntegrityCheck.hpp/.cpp
   msg/
     firmware_integrity_status.msg
+    FirmwareUpdateAuthorization.msg
 
 inoflyGCU (QGC fork — D:\Projects\Drone\qgroundcontrol):
   custom/
@@ -270,4 +272,7 @@ inoflyGCU (QGC fork — D:\Projects\Drone\qgroundcontrol):
     src/FirmwarePlugin/InoflyFirmwarePlugin.h/.cpp
     src/FirmwarePlugin/InoflyFirmwarePluginFactory.h/.cpp
     res/qml/SecurityPanel.qml
+    res/qml/SecureFirmwareUpdatePage.qml
+    res/keys/manufacturer_public.pem
+    src/SecureFirmwareController.h/.cpp
 ```
