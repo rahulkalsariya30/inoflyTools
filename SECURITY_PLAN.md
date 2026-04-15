@@ -1,7 +1,7 @@
 # Drone Security Compliance Plan
 # DGCA UAS Type Certification — Level 1 (Firmware Manufacturer)
 
-Last updated: 2026-04-12
+Last updated: 2026-04-14
 
 ---
 
@@ -29,7 +29,7 @@ enforce integrity at boot. We are NOT the Certification Body (CB).
 | POST004| POST — verify board ID matches hardware  | POST              | ⚠️ TODO        |
 | ARM001 | Arming blocked if POST failed            | Arming Gate       | ✅ Done        |
 | PAR001 | Compliance parameter protection          | Param Protection  | ❌ Not started |
-| LOG001 | Signed audit log — signed with device RoT key | Audit Logging | ❌ Not started |
+| LOG001 | Signed audit log — signed with device RoT key | Audit Logging | ✅ Done (SITL) |
 | UPD001 | Drone rejects unsigned firmware update   | Secure Update     | ✅ Done        |
 
 ---
@@ -140,12 +140,12 @@ firmware must be rejected at the drone level (not just at the QGC level).
 | 2.5 | POST001 | SITL end-to-end integration test |
 | 2.6 | ARM001  | Arming check: block if POST failed |
 
-### Phase 3 — QGC Secure Firmware Plugin ⏳ In Progress
+### Phase 3 — QGC Secure Firmware Plugin ✅ Complete
 | Sub-phase | Req ID | Description | Status |
 |-----------|--------|-------------|--------|
 | 3.1 | POST001/ARM001 | Security status panel (live firmware_integrity_status) | ✅ Done |
 | 3.2 | PKG001/UPD001  | Secure firmware update UI (upload + verify .fwbundle) | ✅ Done |
-| 3.3 | LOG001         | Audit log viewer (real-time feed + full download) | ⏳ Next |
+| 3.3 | LOG001         | Audit log viewer (real-time feed + full download) | ✅ Done |
 | 3.4 | UPD001         | Drone-side firmware update signature rejection | ✅ Done |
 
 ### Phase 4 — Hardware Root of Trust ⏳ Planned (Level 1 Required)
@@ -192,7 +192,7 @@ firmware must be rejected at the drone level (not just at the QGC level).
 | Data hash not verified at runtime | POST003 | High | Yes |
 | Board ID not verified at POST | POST004 | Medium | Possibly |
 | No parameter protection | PAR001 | High | Yes |
-| No audit logging on drone | LOG001 | High | Yes (depends on DEV001) |
+| ~~No audit logging on drone~~ | LOG001 | ~~High~~ | ✅ Resolved (SITL; device key in Phase 4) |
 | ~~Drone doesn't reject unsigned firmware~~ | UPD001 | ~~High~~ | ✅ Resolved |
 | GCS authentication | Phase 7 | Medium | No (Level 1) |
 
@@ -220,7 +220,7 @@ tools/
   checksum/         checksum.py
   signer/           signer.py
   bundler/          bundler.py
-  provisioning/     export_manifest.py, provision_sitl.py
+  provisioning/     export_manifest.py, provision_sitl.py, provision_audit_key.py
   generate_security_doc.py
 
 firmware/
@@ -240,6 +240,7 @@ tests/
     test_PKG001_bundler.py
     test_PRV001_export_manifest.py
     test_PIPE_pipeline.py
+    test_LOG001_audit_log.py
   integration/      Integration tests (requires WSL2 + SITL)
     test_sitl_e2e.py
 
@@ -255,6 +256,8 @@ inoflyPilot (PX4 fork — WSL2):
     secure_boot_main.cpp
     FirmwareIntegrityChecker.hpp/.cpp
     FirmwareUpdateGatekeeper.hpp/.cpp
+    SecurityAuditLogger.hpp/.cpp
+    security_audit_entry.h
     manufacturer_pubkey.h
     security_manifest.h
   src/modules/mavlink/streams/
@@ -264,6 +267,7 @@ inoflyPilot (PX4 fork — WSL2):
   msg/
     firmware_integrity_status.msg
     FirmwareUpdateAuthorization.msg
+    SecurityAuditEvent.msg
 
 inoflyGCU (QGC fork — D:\Projects\Drone\qgroundcontrol):
   custom/
@@ -273,6 +277,8 @@ inoflyGCU (QGC fork — D:\Projects\Drone\qgroundcontrol):
     src/FirmwarePlugin/InoflyFirmwarePluginFactory.h/.cpp
     res/qml/SecurityPanel.qml
     res/qml/SecureFirmwareUpdatePage.qml
+    res/qml/AuditLogPanel.qml
     res/keys/manufacturer_public.pem
     src/SecureFirmwareController.h/.cpp
+    src/AuditLogController.h/.cpp
 ```
