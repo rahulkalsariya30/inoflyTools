@@ -1,7 +1,7 @@
 # Drone Security Compliance Plan
 # DGCA UAS Type Certification — Level 1 (Firmware Manufacturer)
 
-Last updated: 2026-04-14
+Last updated: 2026-04-20
 
 ---
 
@@ -12,66 +12,49 @@ enforce integrity at boot. We are NOT the Certification Body (CB).
 
 ---
 
+## Architecture — Single Keypair
+
+Based on the the audited reference-audited compliance documents (the audited reference/the audited reference):
+
+| Component | Key | Purpose |
+|-----------|-----|---------|
+| Manufacturer (build machine) | **Private key** | Signs firmware, manifests, update bundles at release time |
+| Flight Controller (firmware) | **Public key** | Verifies firmware signature, manifest, updates at runtime |
+
+- Only ONE keypair (ECDSA P-256) for the entire system
+- Private key NEVER leaves the manufacturer's build environment
+- Public key embedded in firmware as C header (`manufacturer_pubkey.h`)
+- On hardware: public key stored in CRP-protected flash (Code Read Protection)
+
+---
+
 ## Requirement IDs
 
 | ID     | Requirement                              | DGCA Clause       | Status        |
 |--------|------------------------------------------|-------------------|---------------|
 | ROT001 | Manufacturer ECDSA P-256 keypair         | RoT (Mfr)         | ✅ Done        |
-| ROT002 | Public key embedded in firmware          | RoT (Mfr)         | ✅ Done        |
-| DEV001 | Flight module hardware RoT (TPM/TEE)     | RoT (Device)      | ❌ Not started |
-| CHK001 | SHA-256 checksums (code + data separate) | Checksum          | ✅ Done        |
-| SIG001 | Manifest signed with manufacturer key    | Signing           | ✅ Done        |
-| PKG001 | Signed firmware update bundle            | Secure Update     | ✅ Done        |
-| PRV001 | Binary manifest provisioned to drone     | Provisioning      | ✅ Done        |
-| POST001| Power On Self Test — CRC + ECDSA verify  | POST              | ✅ Done        |
-| POST002| POST — verify actual code hash (NuttX)   | POST              | ⚠️ TODO        |
-| POST003| POST — verify actual data hash (NuttX)   | POST              | ⚠️ TODO        |
-| POST004| POST — verify board ID matches hardware  | POST              | ⚠️ TODO        |
-| ARM001 | Arming blocked if POST failed            | Arming Gate       | ✅ Done        |
-| PAR001 | Compliance parameter protection          | Param Protection  | ❌ Not started |
-| LOG001 | Signed audit log — signed with device RoT key | Audit Logging | ✅ Done (SITL) |
-| UPD001 | Drone rejects unsigned firmware update   | Secure Update     | ✅ Done        |
+| ROT002 | Public key embedded in firmware           | RoT (Mfr)         | ✅ Done        |
+| CHK001 | SHA-256 checksums (code + data separate)  | Checksum           | ✅ Done        |
+| SIG001 | Manifest signed with manufacturer key     | Signing            | ✅ Done        |
+| PKG001 | Signed firmware update bundle             | Secure Update      | ✅ Done        |
+| PRV001 | Binary manifest provisioned to drone      | Provisioning       | ✅ Done        |
+| POST001| Power On Self Test — CRC + ECDSA verify   | POST               | ✅ Done        |
+| POST002| POST — verify actual code hash (NuttX)    | POST               | ⚠️ Hardware     |
+| POST003| POST — verify actual data hash (NuttX)    | POST               | ⚠️ Hardware     |
+| POST004| POST — verify board ID matches hardware   | POST               | ⚠️ Hardware     |
+| ARM001 | Arming blocked if POST failed             | Arming Gate        | ✅ Done        |
+| PAR001 | Compliance parameter protection (static)  | Param Protection   | ✅ Done (SITL)  |
+| LOG001 | Signed audit log of security events       | Audit Logging      | ✅ Done (SITL)  |
+| UPD001 | Drone rejects unsigned firmware update    | Secure Update      | ✅ Done        |
 
 ---
 
 ## Requirement Details
 
-### DEV001 — Flight module hardware Root of Trust (TPM/TEE)
-
-The flight module (OrangeCube / Pixhawk) must have its own hardware-bound Root of Trust
-separate from the manufacturer's build-time key. This is required by DGCA Level 1.
-
-**Two-layer RoT architecture:**
-
-| Layer | Key Owner | Purpose |
-|-------|-----------|---------|
-| Manufacturer RoT (ROT001) | Build machine TPM/HSM | Signs firmware, manifests, update bundles at release time |
-| Device RoT (DEV001) | Flight module TPM/TEE | Signs data generated at runtime: audit logs, POST attestations |
-
-**Why two keys are needed:**
-- The manufacturer key proves a firmware *release* is authentic
-- The device key proves a specific *drone's runtime data* (logs, attestations) is authentic
-- Without a device key, you cannot prove which drone generated which audit log entry
-
-**Implementation approach:**
-- Each flight module has a TPM 2.0 chip (or equivalent TEE)
-- At manufacturing/provisioning time, a device keypair is generated inside the TPM
-  (private key never leaves the chip)
-- The manufacturer issues a device certificate: signs the device public key with ROT001,
-  binding the device identity to the manufacturer
-- At runtime, all data generated by the flight module (LOG001 entries, POST attestations)
-  are signed with the device key via the TPM API
-
-**SITL:** Not applicable — TPM is hardware-only.
-**Target:** OrangeCube / Pixhawk (Phase 4)
-**Blocked by:** Physical hardware with TPM 2.0 or equivalent TEE
-
----
-
 ### POST002 — Verify actual code hash (NuttX)
 Hash the firmware binary at runtime using linker symbols `_stext/_etext`
 (flash start/end addresses) and compare against `manifest.code_hash`.
-- **Blocked by:** Requires `BOARD_CRYPTO=y` Kconfig + libtomcrypt on NuttX
+- **Blocked by:** Requires `BOARD_CRYPTO=y` Kconfig + mbedTLS on NuttX
 - **SITL:** Stubbed (returns true) — not meaningful in simulation
 - **Target:** OrangeCube / Pixhawk hardware
 
@@ -87,22 +70,53 @@ runtime detection) and compare against `manifest.board_id`.
 - **Effort:** Small — board ID is available at compile time via `CONFIG_BOARD_ID`
 - **Target:** Both SITL and NuttX
 
-### PAR001 — Compliance parameter protection
-Safety-critical parameters (max altitude, geofence, speed limits) must only
-be changeable with a valid manufacturer signature. Unsigned writes to these
-parameters must be rejected.
-- **New requirement — not yet designed**
-- **Approach:** PX4 parameter callback intercept + signature verification
-- **Affected params:** To be defined (COM_ARM_*, GF_MAX_HOR_DIST, etc.)
+### PAR001 — Compliance parameter protection (static compilation)
+Safety-critical compliance parameters are **statically compiled** into the
+firmware binary. They cannot be changed from any GCS at runtime.
+
+**Protected parameters** (from audited docs, Section 3.1b):
+- Max Altitude AGL → `GF_MAX_VER_DIST`
+- Max Speed → `MPC_XY_VEL_MAX`
+- Fence Range → `GF_MAX_HOR_DIST`
+- Frame Type → `SYS_AUTOSTART`
+- Additional client-specific parameters (table is extensible)
+
+**Approach — zero-window protection at the parameter library level:**
+A single table in `compliance_params.h` lists every parameter to lock
+(name, description, type, value). Protection is enforced directly in PX4's
+parameter system (`src/lib/parameters/`), not by polling:
+- `param_set_internal()` **blocks writes** to protected parameters
+- `param_get()` **returns the compiled value** for protected parameters
+- `param_reset_internal()` / `param_reset_all_internal()` **skip** protected parameters
+- MAVLink `PARAM_SET` handler returns `MAV_PARAM_ERROR_READ_ONLY` to GCS
+
+Protection is active from the very first parameter access (before any
+module starts), with zero timing gap. An `AtomicBitset` cache provides
+O(1) lookup on the control loop hot path. Adding a new protected parameter
+requires only one row in `compliance_params.h` — no code changes.
+
+`ComplianceParamGuard` (audit-only role) registers a violation callback
+for logging and provides `param_status` diagnostics.
+
+**Violation logging:** Any blocked write attempt is logged as
+`EVENT_PARAM_CHANGE` via the SecurityAuditLogger (LOG001).
+
+**Why static compilation + zero-window:** This is the approach used in the
+the audited reference-audited implementation (Section 7). Eliminates the need for
+signature-gated parameter writes and provides the strongest protection —
+the values literally cannot be changed without re-flashing signed firmware.
+No timing gap, no race condition, no bypass via MAVLink/shell/BSON import.
 
 ### LOG001 — Signed audit log of security events
-All security events must be logged to persistent storage (SD card) and each
-entry must be signed with the **device RoT key** (DEV001 TPM/TEE — not the
-manufacturer key). This proves which specific drone generated each log entry
-and that the entry has not been tampered with after the fact.
+All security events are logged to persistent storage (SD card).
 
-The manufacturer's ROT001 key is used to verify the device certificate; it does
-NOT sign runtime data.
+**SITL implementation (current):** Per-entry ECDSA P-256 signing using a
+provisioned signing key. Each 132-byte entry is individually signed.
+
+**Hardware approach (from audited docs):** Per-file log signing — the drone
+encrypts the log file hash with the public key, producing a downloadable
+`.sig` file. The manufacturer verifies by decrypting with the private key
+and comparing against the SHA-256 of the log file.
 
 Events to log:
 - POST result (pass/fail + reason) on every boot
@@ -110,12 +124,10 @@ Events to log:
 - Arming block (reason, timestamp)
 - Parameter change attempt on protected params (PAR001)
 
-Log format: append-only binary file, each entry signed with ECDSA P-256.
-
 ### UPD001 — Drone rejects unsigned firmware update
-The flight controller must verify the manufacturer signature on a firmware
+The flight controller verifies the manufacturer signature on a firmware
 bundle before accepting a flash operation. Any unsigned or wrongly-signed
-firmware must be rejected at the drone level (not just at the QGC level).
+firmware is rejected at the drone level (not just at the QGC level).
 
 ---
 
@@ -140,7 +152,7 @@ firmware must be rejected at the drone level (not just at the QGC level).
 | 2.5 | POST001 | SITL end-to-end integration test |
 | 2.6 | ARM001  | Arming check: block if POST failed |
 
-### Phase 3 — QGC Secure Firmware Plugin ✅ Complete
+### Phase 3 — QGC Security Plugin ✅ Complete
 | Sub-phase | Req ID | Description | Status |
 |-----------|--------|-------------|--------|
 | 3.1 | POST001/ARM001 | Security status panel (live firmware_integrity_status) | ✅ Done |
@@ -148,22 +160,21 @@ firmware must be rejected at the drone level (not just at the QGC level).
 | 3.3 | LOG001         | Audit log viewer (real-time feed + full download) | ✅ Done |
 | 3.4 | UPD001         | Drone-side firmware update signature rejection | ✅ Done |
 
-### Phase 4 — Hardware Root of Trust ⏳ Planned (Level 1 Required)
-| Sub-phase | Req ID | Description |
-|-----------|--------|-------------|
-| 4.1 | ROT001 | Move manufacturer signing key to TPM/HSM (build machine) |
-| 4.2 | DEV001 | Flight module TPM/TEE: device keypair generation + provisioning |
-| 4.3 | DEV001 | Manufacturer issues device certificate (signs device pubkey with ROT001) |
-| 4.4 | POST002/003 | Real code + data hash verification on NuttX hardware |
-| 4.5 | LOG001 | Audit log entries signed with device TPM key (not manufacturer key) |
+### Phase 4 — Parameter Protection ✅ Complete
+| Sub-phase | Req ID | Description | Status |
+|-----------|--------|-------------|--------|
+| 4.1 | PAR001 | Table-driven compliance_params.h (extensible per client) | ✅ Done |
+| 4.2 | PAR001 | Zero-window protection in parameter library (param_set/get/reset blocked) | ✅ Done |
+| 4.3 | PAR001 | Audit logging of parameter change violations | ✅ Done |
+| 4.4 | PAR001 | Tests (26 passing) + compliance mapping | ✅ Done |
 
-### Phase 5 — Parameter Protection ⏳ Planned
+### Phase 5 — Hardware Deployment ⏳ Planned
 | Sub-phase | Req ID | Description |
 |-----------|--------|-------------|
-| 5.1 | PAR001 | Define protected parameter list |
-| 5.2 | PAR001 | PX4 parameter write intercept |
-| 5.3 | PAR001 | Signature verification on protected param writes |
-| 5.4 | PAR001 | Tests + compliance mapping |
+| 5.1 | ROT002 | Public key in CRP-protected flash (Code Read Protection) |
+| 5.2 | POST002/003 | Real code + data hash verification on NuttX (mbedTLS) |
+| 5.3 | POST004 | Board ID verification on hardware |
+| 5.4 | LOG001 | Per-file log signing (aligned with audited approach) |
 
 ### Phase 6 — Compliance Test Suite ⏳ Final
 | Sub-phase | Req ID | Description |
@@ -174,27 +185,18 @@ firmware must be rejected at the drone level (not just at the QGC level).
 | 6.4 | POST002/003 | SITL stub tests + NuttX TODO documentation |
 | 6.5 | ALL    | Full compliance report generation (DGCA submission) |
 
-### Phase 7 — GCS Authentication ⏳ Skipped (future consideration)
-| Sub-phase | Description |
-|-----------|-------------|
-| 7.1 | MAVLink 2 message signing (shared secret) |
-| 7.2 | GCS pairing — only paired GCS can control drone |
-| 7.3 | Pairing key stored in TPM (requires Phase 4) |
-
 ---
 
 ## Gap Summary
 
 | Gap | Req ID | Severity | Blocking DGCA submission? |
 |-----|--------|----------|--------------------------|
-| No flight module hardware RoT (TPM/TEE) | DEV001 | **Critical** | Yes |
-| Code hash not verified at runtime | POST002 | High | Yes |
-| Data hash not verified at runtime | POST003 | High | Yes |
+| Code hash not verified at runtime | POST002 | High | Yes (hardware only) |
+| Data hash not verified at runtime | POST003 | High | Yes (hardware only) |
 | Board ID not verified at POST | POST004 | Medium | Possibly |
-| No parameter protection | PAR001 | High | Yes |
-| ~~No audit logging on drone~~ | LOG001 | ~~High~~ | ✅ Resolved (SITL; device key in Phase 4) |
+| ~~No parameter protection~~ | PAR001 | ~~High~~ | ✅ Resolved (SITL) |
+| ~~No audit logging on drone~~ | LOG001 | ~~High~~ | ✅ Resolved (SITL) |
 | ~~Drone doesn't reject unsigned firmware~~ | UPD001 | ~~High~~ | ✅ Resolved |
-| GCS authentication | Phase 7 | Medium | No (Level 1) |
 
 ---
 
@@ -202,12 +204,14 @@ firmware must be rejected at the drone level (not just at the QGC level).
 
 | Usage | Algorithm | Notes |
 |-------|-----------|-------|
-| Signing key | ECDSA P-256 (secp256r1) | NIST-approved |
+| Signing key | ECDSA P-256 (secp256r1) | NIST-approved, comparable to RSA-2048 |
 | Hash | SHA-256 | Minimum per DGCA Level 1 |
 | Key encoding (storage) | PEM | |
 | Key encoding (firmware) | DER SubjectPublicKeyInfo | 91 bytes for P-256 |
 | Signature encoding | DER (ASN.1) | Max 72 bytes for P-256 |
 | Corruption detection | CRC32 | For binary manifest only |
+| Crypto library (SITL) | OpenSSL | Available on host OS |
+| Crypto library (hardware) | mbedTLS | Lightweight, designed for MCU (STM32) |
 
 ---
 
@@ -241,6 +245,7 @@ tests/
     test_PRV001_export_manifest.py
     test_PIPE_pipeline.py
     test_LOG001_audit_log.py
+    test_PAR001_param_protection.py
   integration/      Integration tests (requires WSL2 + SITL)
     test_sitl_e2e.py
 
@@ -257,9 +262,13 @@ inoflyPilot (PX4 fork — WSL2):
     FirmwareIntegrityChecker.hpp/.cpp
     FirmwareUpdateGatekeeper.hpp/.cpp
     SecurityAuditLogger.hpp/.cpp
+    ComplianceParamGuard.hpp/.cpp
+    compliance_params.h
     security_audit_entry.h
     manufacturer_pubkey.h
     security_manifest.h
+  src/lib/parameters/
+    compliance_check.h/.cpp   (PAR001 zero-window enforcement)
   src/modules/mavlink/streams/
     FIRMWARE_INTEGRITY_STATUS.hpp
   src/modules/commander/HealthAndArmingChecks/checks/
