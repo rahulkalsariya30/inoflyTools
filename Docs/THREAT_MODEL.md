@@ -49,8 +49,8 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | **Attack** | Attacker replaces firmware binary on flash storage (physical access or exploited update path) |
 | **Impact** | Full drone control — arbitrary code execution on flight controller |
 | **Likelihood** | Medium (requires physical access or compromised update channel) |
-| **Mitigations** | CHK001 (SHA-256 checksums), SIG001 (ECDSA signed manifest), POST001 (boot-time verification), ARM001 (arming blocked on mismatch) |
-| **Residual risk** | Low — attacker must also forge the manufacturer's ECDSA P-256 signature |
+| **Mitigations** | CHK001 (SHA-256 checksums), SIG001 (RSA-PSS signed manifest), POST001 (boot-time verification), ARM001 (arming blocked on mismatch) |
+| **Residual risk** | Low — attacker must also forge the manufacturer's RSA-3072 signature |
 
 ### T2 — Manifest tampering
 
@@ -59,14 +59,14 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | **Attack** | Attacker modifies checksums in the manifest to match their tampered firmware |
 | **Impact** | POST passes with malicious firmware |
 | **Likelihood** | Medium |
-| **Mitigations** | SIG001 (manifest is signed — changing any field invalidates the signature), POST001 (ECDSA verification at every boot) |
+| **Mitigations** | SIG001 (manifest is signed — changing any field invalidates the signature), POST001 (RSA-PSS verification at every boot) |
 | **Residual risk** | Low — requires manufacturer private key to re-sign |
 
 ### T3 — Manufacturer key compromise
 
 | Field | Value |
 |-------|-------|
-| **Attack** | Attacker obtains the manufacturer ECDSA private key |
+| **Attack** | Attacker obtains the manufacturer RSA-3072 private key |
 | **Impact** | Critical — can sign arbitrary firmware that passes all verification |
 | **Likelihood** | Low (key stored in TPM/HSM in production; file-based only during development) |
 | **Mitigations** | ROT001 (key generated in TPM/HSM for production), Phase 4.1 (hardware-bound key), key never transmitted over network |
@@ -119,7 +119,7 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | **Attack** | Non-malicious: flash bit-rot, power loss during write, radiation effects |
 | **Impact** | Manifest unreadable or corrupted — POST fails, drone won't arm |
 | **Likelihood** | Low but non-zero over fleet lifetime |
-| **Mitigations** | CRC32 in binary manifest (detects corruption before ECDSA check), POST001 reports specific failure reason (MANIFEST_CORRUPTED vs SIGNATURE_INVALID) |
+| **Mitigations** | CRC32 in binary manifest (detects corruption before RSA-PSS check), POST001 reports specific failure reason (MANIFEST_CORRUPTED vs SIGNATURE_INVALID) |
 | **Residual risk** | Acceptable — drone fails safe (won't arm), operator re-provisions |
 
 ### T9 — Board ID mismatch (wrong firmware on wrong hardware)
