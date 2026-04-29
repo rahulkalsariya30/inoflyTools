@@ -21,7 +21,7 @@ NOTE:
   tests only (tests/compliance/).
 
 WHAT THIS COVERS (Phase 6.1 / 6.2):
-  - POST001: CRC + ECDSA verification passes with valid manifest
+  - POST001: CRC + RSA-PSS verification passes with valid manifest
   - ARM001:  Arming gate reads firmware_integrity_status.check_passed
 """
 
@@ -125,12 +125,13 @@ def run_sitl_check() -> dict:
         "echo DONE"
     )
 
-    # Alternative: use the PX4 command mode directly
+    # Use the PX4 command mode directly — pipe commands via stdin
     cmd = (
         "cd ~/PX4-Autopilot/build/px4_sitl_default && "
+        "export PX4_SIM_MODEL=shell && "
         "echo -e 'secure_boot start\\nlistener firmware_integrity_status -n 1\\nshutdown' | "
         f"timeout {SITL_BOOT_TIMEOUT + MODULE_TIMEOUT + LISTENER_TIMEOUT} "
-        "PX4_SIM_MODEL=shell ./bin/px4 -s ../../ROMFS/px4fmu_common/init.d-posix/rcS 2>&1"
+        "./bin/px4 -s ../../ROMFS/px4fmu_common/init.d-posix/rcS 2>&1"
     )
 
     print("[3/4] Running secure_boot and capturing status...")
@@ -141,6 +142,10 @@ def run_sitl_check() -> dict:
         return {}
 
     output = r.stdout + r.stderr
+
+    # Strip ANSI escape codes (PX4 pxh> shell uses terminal control sequences)
+    import re
+    output = re.sub(r'\x1b\[[0-9;]*[A-Za-z]|\[2K', '', output)
 
     # Parse firmware_integrity_status from listener output
     result = {}
@@ -183,7 +188,7 @@ def evaluate_results(status: dict) -> bool:
             0: "NONE (this shouldn't happen with check_passed=False)",
             1: "NO_MANIFEST — manifest.bin not found in SITL storage",
             2: "MANIFEST_CORRUPTED — CRC32 mismatch",
-            3: "SIGNATURE_INVALID — ECDSA verification failed (wrong key?)",
+            3: "SIGNATURE_INVALID — RSA-PSS verification failed (wrong key?)",
             4: "CODE_HASH_MISMATCH — should not happen in SITL (stubbed)",
             5: "DATA_HASH_MISMATCH — should not happen in SITL (stubbed)",
             6: "BOARD_ID_MISMATCH — board_id in manifest doesn't match hardware",
@@ -218,7 +223,7 @@ def main():
     print("\n" + "=" * 60)
     if passed:
         print("RESULT: ALL CHECKS PASSED")
-        print("  POST001: CRC + ECDSA verification — PASS")
+        print("  POST001: CRC + RSA-PSS verification — PASS")
         print("  ARM001:  Arming gate reads check_passed=True — PASS")
     else:
         print("RESULT: INTEGRATION TEST FAILED")

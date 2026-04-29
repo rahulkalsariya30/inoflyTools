@@ -4,15 +4,21 @@ tools/pki/keygen.py
 Manufacturer Key Generation Tool
 Requirement: ROT001 - Root of Trust keypair for firmware manufacturer
 
-Generates an ECDSA P-256 keypair:
-  - Private key: used by manufacturer to SIGN firmware and parameter updates
-  - Public key:  stored on flight module to VERIFY manufacturer signatures
+Generates an RSA-3072 keypair:
+  - Private key: used by manufacturer to SIGN firmware, manifests, and update bundles
+  - Public key:  stored on flight module to VERIFY signatures and ENCRYPT log hashes
 
-WHY ECDSA P-256?
-  - Approved by NIST, accepted by aviation regulators
-  - Smaller and faster than RSA while providing equivalent security
-  - Supported by PX4's built-in crypto library (libtomcrypt)
-  - SHA-256 based — meets the SHA-2 requirement in DGCA Level 1
+WHY RSA-3072?
+  - Approved by NIST (SP 800-57), accepted by aviation regulators
+  - 128-bit security level — recommended for use beyond 2030
+  - Supports both signing (firmware/manifests) and encryption (log hashes)
+  - Single keypair for all operations — matches the audited reference-audited approach
+  - Supported by mbedTLS on STM32 and OpenSSL on SITL
+
+WHY not ECDSA?
+  - ECDSA is signature-only — cannot encrypt with public key
+  - the audited reference Section 8 requires public-key encryption of log file hashes
+  - RSA supports both operations with one keypair
 
 NEVER share or commit the private key.
 The public key is safe to distribute — it goes into the firmware.
@@ -20,9 +26,11 @@ The public key is safe to distribute — it goes into the firmware.
 
 import os
 from pathlib import Path
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 
+# RSA key size — 3072 bits provides 128-bit security (NIST SP 800-57)
+RSA_KEY_SIZE = 3072
 
 # Output paths relative to project root
 PKI_DIR = Path(__file__).resolve().parent.parent.parent / "pki" / "manufacturer"
@@ -32,7 +40,7 @@ PUBLIC_KEY_PATH  = PKI_DIR / "public"  / "manufacturer_public.pem"
 
 def generate_keypair() -> tuple[bytes, bytes]:
     """
-    Generate an ECDSA P-256 keypair.
+    Generate an RSA-3072 keypair.
 
     Returns:
         (private_key_pem, public_key_pem) as bytes
@@ -40,8 +48,11 @@ def generate_keypair() -> tuple[bytes, bytes]:
     The private key is encrypted with a passphrase if provided,
     otherwise stored unencrypted (only do this in a secure environment).
     """
-    # Generate the private key using NIST P-256 curve (also called secp256r1)
-    private_key = ec.generate_private_key(ec.SECP256R1())
+    # Generate RSA-3072 private key with standard public exponent 65537
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=RSA_KEY_SIZE,
+    )
 
     # Serialize private key to PEM format — unencrypted for now
     # In production: use BestAvailableEncryption(passphrase) instead of NoEncryption()
@@ -107,7 +118,7 @@ if __name__ == "__main__":
             print("Aborted.")
             exit(0)
 
-    print("Generating ECDSA P-256 manufacturer keypair...")
+    print("Generating RSA-3072 manufacturer keypair...")
     private_key_pem, public_key_pem = generate_keypair()
     save_keypair(private_key_pem, public_key_pem)
     print("Done.")

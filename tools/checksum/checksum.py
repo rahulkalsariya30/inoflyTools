@@ -17,11 +17,18 @@ WHY SHA-256?
   - SHA-256 is the standard choice: well-understood, hardware-accelerated,
     supported everywhere including PX4's libtomcrypt
 
-.px4 FILE FORMAT:
-  A .px4 file is a JSON container. Key fields:
-    "image"         — firmware binary, zlib-compressed then base64-encoded
-    "parameter_xml" — default parameter set, zlib-compressed then base64-encoded
-  We extract, decompress, and hash each field separately.
+MODES OF OPERATION:
+  1. SITL (default): Extract image from .px4 JSON and hash it. The .px4 file
+     contains base64(zlib(firmware_bytes)). Code and data extracted from it.
+
+  2. Hardware (--code-bin / --data-bin): Hash pre-extracted ELF section binaries.
+     The user runs objcopy in WSL to extract .text and .data sections from the
+     ELF, then passes those binary files here. This ensures the hashes match
+     what the FC computes from flash at runtime (POST002/POST003).
+
+     Extraction commands (run in WSL after building):
+       arm-none-eabi-objcopy -O binary --only-section=.text firmware.elf code.bin
+       arm-none-eabi-objcopy -O binary --only-section=.data firmware.elf data.bin
 """
 
 import base64
@@ -98,20 +105,52 @@ def compute_data_checksum(px4_path: Path) -> str:
     return digest
 
 
-def generate_manifest(px4_path: Path, firmware_version: str = "") -> dict:
+def compute_file_checksum(file_path: Path) -> str:
     """
-    Generate a checksum manifest for a .px4 firmware file.
+    Compute SHA-256 checksum of a raw binary file.
+    Used for hardware builds where code/data sections are extracted from ELF.
+
+    Returns:
+        Hex string of the SHA-256 digest (64 characters)
+    """
+    data = Path(file_path).read_bytes()
+    if len(data) == 0:
+        raise ValueError(f"Binary file is empty: {file_path}")
+    return hashlib.sha256(data).hexdigest()
+
+
+def generate_manifest(
+    px4_path: Path,
+    firmware_version: str = "",
+    board_id: int = None,
+    code_bin_path: Path = None,
+    data_bin_path: Path = None,
+) -> dict:
+    """
+    Generate a checksum manifest for a firmware file.
 
     The manifest contains:
-      - code_checksum: SHA-256 of firmware binary
-      - data_checksum: SHA-256 of default parameter set
+      - code_checksum: SHA-256 of firmware code section
+      - data_checksum: SHA-256 of firmware data section
       - firmware_version: version string (from .px4 or caller-provided)
       - source_file: original .px4 filename
       - generated_at: ISO timestamp (UTC)
       - algorithm: always "SHA-256" — documents what was used
 
-    This manifest is what gets registered on the flight module and
-    checked on every boot (POST).
+    For hardware builds (when code_bin_path/data_bin_path are provided):
+      - code_checksum = SHA-256 of the .text section binary (matches POST002)
+      - data_checksum = SHA-256 of the .data section binary (matches POST003)
+
+    For SITL builds (default):
+      - code_checksum = SHA-256 of the image from .px4 file
+      - data_checksum = SHA-256 of parameter_xml from .px4 file
+
+    Args:
+        px4_path:       Path to the .px4 firmware file
+        firmware_version: Override version string
+        board_id:       Override board ID (default: read from .px4)
+        code_bin_path:  Path to extracted .text section binary (hardware mode)
+        data_bin_path:  Path to extracted .data section binary (hardware mode)
     """
     with open(px4_path, "r") as f:
         firmware_meta = json.load(f)
@@ -119,14 +158,28 @@ def generate_manifest(px4_path: Path, firmware_version: str = "") -> dict:
     # Use provided version, fall back to version embedded in .px4
     version = firmware_version or firmware_meta.get("version", "unknown")
 
+    # Board ID: explicit override > .px4 metadata > 0
+    manifest_board_id = board_id if board_id is not None else firmware_meta.get("board_id", 0)
+
+    # Compute checksums: hardware mode (ELF sections) or SITL mode (.px4 image)
+    if code_bin_path is not None:
+        code_hash = compute_file_checksum(code_bin_path)
+    else:
+        code_hash = compute_code_checksum(px4_path)
+
+    if data_bin_path is not None:
+        data_hash = compute_file_checksum(data_bin_path)
+    else:
+        data_hash = compute_data_checksum(px4_path)
+
     manifest = {
         "algorithm": "SHA-256",
         "firmware_version": version,
         "source_file": Path(px4_path).name,
-        "board_id": firmware_meta.get("board_id", 0),
+        "board_id": manifest_board_id,
         "git_hash": firmware_meta.get("git_hash", ""),
-        "code_checksum": compute_code_checksum(px4_path),
-        "data_checksum": compute_data_checksum(px4_path),
+        "code_checksum": code_hash,
+        "data_checksum": data_hash,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
     return manifest
@@ -152,6 +205,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("px4_file", help="Path to the .px4 firmware file")
     parser.add_argument("--version", default="", help="Firmware version string (optional)")
+    parser.add_argument("--board-id", type=int, default=None,
+                        help="Override board ID (default: read from .px4)")
+    parser.add_argument("--code-bin", default=None,
+                        help="Path to extracted .text section binary (hardware mode)")
+    parser.add_argument("--data-bin", default=None,
+                        help="Path to extracted .data section binary (hardware mode)")
     parser.add_argument("--output", default="", help="Output path for manifest JSON (optional)")
     args = parser.parse_args()
 
@@ -160,8 +219,25 @@ if __name__ == "__main__":
         print(f"[ERROR] File not found: {px4_path}")
         exit(1)
 
-    print(f"Computing checksums for: {px4_path.name}")
-    manifest = generate_manifest(px4_path, firmware_version=args.version)
+    code_bin = Path(args.code_bin) if args.code_bin else None
+    data_bin = Path(args.data_bin) if args.data_bin else None
+
+    if code_bin and not code_bin.exists():
+        print(f"[ERROR] Code binary not found: {code_bin}")
+        exit(1)
+    if data_bin and not data_bin.exists():
+        print(f"[ERROR] Data binary not found: {data_bin}")
+        exit(1)
+
+    mode = "hardware (ELF sections)" if code_bin else "SITL (.px4 image)"
+    print(f"Computing checksums for: {px4_path.name}  [{mode}]")
+    manifest = generate_manifest(
+        px4_path,
+        firmware_version=args.version,
+        board_id=args.board_id,
+        code_bin_path=code_bin,
+        data_bin_path=data_bin,
+    )
 
     print(f"  Code checksum (SHA-256): {manifest['code_checksum']}")
     print(f"  Data checksum (SHA-256): {manifest['data_checksum']}")

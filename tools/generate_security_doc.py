@@ -166,7 +166,7 @@ def build():
         ("Step 1 — We sign the firmware before release",
          "When we build a firmware release, our build tools automatically calculate a "
          "unique fingerprint (SHA-256 checksum) for the software. A digital signature "
-         "is then applied using our private cryptographic key — similar to a wax seal "
+         "is then applied using our private cryptographic key (RSA-3072) — similar to a wax seal "
          "on an envelope. This signed bundle is what gets shipped."),
         ("Step 2 — The signed bundle is loaded onto the drone",
          "A provisioning tool writes a small 'manifest' file onto the drone's storage. "
@@ -185,17 +185,25 @@ def build():
          "Our custom QGroundControl plugin displays the live security status of the "
          "drone. The operator can see whether the firmware integrity check passed, "
          "review the audit log, and upload signed firmware updates."),
-        ("Step 6 — Each drone has its own hardware security identity",
-         "Every flight module contains a TPM 2.0 hardware security chip. At manufacturing "
-         "time, a unique device key is generated inside this chip — it never leaves the "
-         "hardware. The manufacturer certifies this device key, creating a chain: "
-         "manufacturer key → certifies → device key. All data the drone generates at "
-         "runtime (audit logs, boot attestations) is signed by the device's own key, "
-         "proving exactly which drone produced it."),
+        ("Step 6 — Safety-critical parameters are locked",
+         "Parameters like maximum altitude, geofence range, and maximum speed are "
+         "statically compiled into the firmware and cannot be changed from any ground "
+         "control station at runtime. Any attempt to modify them is blocked and logged "
+         "to the audit trail."),
         ("Step 7 — Only signed firmware updates are accepted",
          "When a firmware update is needed, the drone itself verifies the manufacturer "
          "signature on the update bundle before accepting it. An unsigned or tampered "
          "update is rejected — even if someone tries to push it directly."),
+        ("Step 8 — Only authorised ground control software can communicate",
+         "Each drone is provisioned with a unique MAVLink signing key during manufacturing. "
+         "Only a GCS with the matching key can send commands to the drone. Unauthorised "
+         "ground control software (without the key) is rejected. The signing mode cannot "
+         "be disabled at runtime."),
+        ("Step 9 — All security events are logged with tamper-evident signing",
+         "Every security event (boot check results, firmware update attempts, parameter "
+         "change violations) is written to a binary audit log on the drone's storage. "
+         "The entire log file is signed using the manufacturer's RSA key, creating a "
+         "tamper-evident trail that can be verified offline."),
     ]
 
     for title_text, detail in steps:
@@ -215,16 +223,15 @@ def build():
         "All signing and verification in this system is built on industry-standard "
         "cryptographic algorithms approved by NIST and required by DGCA:"
     )
-    add_bullet(doc, "Signing Algorithm: ECDSA P-256 (also called secp256r1) — the same algorithm used to secure HTTPS on the internet.")
+    add_bullet(doc, "Signing Algorithm: RSA-3072 with PSS padding — a widely trusted algorithm used in banking, aviation, and government systems. 3072-bit keys provide 128-bit security, recommended by NIST beyond 2030.")
     add_bullet(doc, "Hash / Fingerprint: SHA-256 — produces a unique 64-character fingerprint of any file. A single changed bit produces a completely different fingerprint.")
-    add_body(doc, "\nTwo-layer key architecture (DGCA Level 1 requirement):", bold=True)
-    add_bullet(doc, "Manufacturer Key (ROT001) — held on the build machine (TPM/HSM). Signs firmware releases, manifests, and update bundles. Proves a build is authentic.")
-    add_bullet(doc, "Device Key (DEV001) — held inside each drone's TPM chip. Signs data the drone generates at runtime: audit logs, boot attestations. Proves which drone produced which data.")
+    add_bullet(doc, "GCS-FC Pairing: MAVLink v2 message signing with 32-byte HMAC-SHA256 key — ensures only authorised ground control software can communicate with the drone.")
+    add_body(doc, "\nSingle keypair architecture:", bold=True)
+    add_bullet(doc, "Private key — held ONLY on the manufacturer's build machine. Signs firmware releases, manifests, and update bundles. Decrypts audit log signatures for offline verification. Never leaves the build environment.")
+    add_bullet(doc, "Public key — embedded in every drone's firmware as a C header. Verifies signatures at boot (POST), encrypts audit log hashes for tamper-evident signing.")
     add_body(doc,
-        "These are two different keys with two different purposes. The manufacturer key covers "
-        "what we release; the device key covers what the drone does in the field. Without a "
-        "device key, you cannot prove which drone generated which audit log entry — a requirement "
-        "for DGCA Level 1 compliance."
+        "RSA enables both signing (firmware verification) and encryption (audit log signing) "
+        "with the same keypair. This keeps the architecture simple: one keypair, two uses."
     )
 
     # ── 5. Requirement table ───────────────────────────────────────────────────
@@ -255,35 +262,35 @@ def build():
 
     rows = [
         ("ROT001", "Manufacturer must have a cryptographic identity (private key)",
-         "ECDSA P-256 keypair generated and stored securely. Private key never leaves the build environment. Phase 4 will move this into a TPM/HSM hardware chip.", "done"),
+         "RSA-3072 keypair generated and stored securely. Private key never leaves the build environment.", "done"),
         ("ROT002", "Public key must be embedded inside the firmware",
-         "Public key is compiled into the firmware as a C header file. The drone always has it available for verification.", "done"),
-        ("DEV001", "Each flight module must have its own hardware-bound Root of Trust (TPM/TEE)",
-         "Every drone needs a TPM 2.0 chip with a unique device key. The manufacturer certifies this key, creating a chain of trust. All runtime data (logs, attestations) is signed by the device key — not the manufacturer key.", "todo"),
+         "Public key is compiled into the firmware as a C header file (DER format). The drone always has it available for verification.", "done"),
         ("CHK001", "Firmware code and data must each have a separate fingerprint",
          "SHA-256 checksums are computed separately for the code section and data section of every firmware build.", "done"),
         ("SIG001", "The firmware manifest (fingerprints + metadata) must be digitally signed",
-         "Our signing tool signs the manifest with the manufacturer private key. The signature is part of every release bundle.", "done"),
+         "Our signing tool signs the manifest with the manufacturer private key (RSA-PSS). The signature is part of every release bundle.", "done"),
         ("PKG001", "Firmware must be packaged as a tamper-evident signed bundle",
          "Bundler tool produces a .fwbundle file containing firmware binary + signed manifest. Any tampering breaks the signature.", "done"),
         ("PRV001", "Signed manifest must be provisioned onto the drone",
-         "Provisioning tool writes the binary manifest to drone storage. Verified locally before writing.", "done"),
+         "Provisioning tool writes the 501-byte binary manifest to drone storage. CRC32 + RSA-PSS verified locally before writing.", "done"),
         ("POST001", "Drone must verify firmware integrity on every boot (Power On Self Test)",
-         "secure_boot module runs at boot, checks CRC32 integrity + ECDSA signature, publishes result via internal message bus.", "done"),
+         "secure_boot module runs at boot: CRC32 integrity check, then RSA-PSS signature verification. Publishes result via uORB message bus.", "done"),
         ("POST002", "POST must verify actual firmware code in memory (hardware)",
-         "To be implemented in Phase 4. Requires NuttX RTOS crypto support. SITL currently returns a pass stub.", "todo"),
+         "Requires NuttX linker symbols for flash addresses. SITL returns pass stub. Target: OrangeCube/Pixhawk with mbedTLS.", "todo"),
         ("POST003", "POST must verify actual firmware data in memory (hardware)",
-         "To be implemented in Phase 4. Requires knowing the exact data storage address on the target hardware.", "todo"),
+         "Requires knowledge of PX4 parameter storage address on target hardware. SITL returns pass stub.", "todo"),
         ("POST004", "POST must verify the board ID matches the expected hardware",
-         "To be implemented in Phase 6. Board ID is available at compile time — small effort.", "todo"),
+         "Board ID available at compile time via CONFIG_BOARD_ID. Small effort — compare manifest vs hardware.", "todo"),
         ("ARM001", "Drone must block take-off if POST failed",
-         "Arming check module reads the POST result. If the check did not pass, arming is blocked and a preflight failure is shown.", "done"),
-        ("PAR001", "Safety-critical parameters can only be changed with a valid manufacturer signature",
-         "To be designed and built in Phase 5. Affects parameters like max altitude, geofence radius, speed limits.", "todo"),
+         "Arming check module subscribes to firmware_integrity_status. If check_passed is false, arming is blocked with preflight failure.", "done"),
+        ("PAR001", "Safety-critical parameters must be protected from unauthorised changes",
+         "Six parameters statically compiled and locked: max altitude, max speed, fence range, frame type, frame config, MAVLink signing mode. Any write attempt is blocked and logged.", "done"),
         ("LOG001", "All security events must be written to a signed, tamper-evident audit log",
-         "Drone signs each log entry with its own device key (DEV001), proving which drone generated it. QGC viewer built in Phase 3. Drone-side signing requires DEV001 (Phase 4).", "todo"),
+         "132-byte binary entries with CRC32 integrity. Per-file RSA signing: SHA-256 of audit_log.bin encrypted with public key, verified offline with private key.", "done"),
         ("UPD001", "The drone must reject any firmware update that is not signed by the manufacturer",
-         "Drone-side rejection to be built in Phase 3. QGC already handles the signed bundle upload flow.", "todo"),
+         "FirmwareUpdateGatekeeper verifies staged manifest (CRC32 + RSA-PSS) before authorising bootloader reboot. QGC also verifies client-side.", "done"),
+        ("PAIR001", "Only authorised GCS software can communicate with the drone",
+         "MAVLink v2 message signing with 32-byte per-drone key. MAV_SIGN_CFG locked to 1 by PAR001. Provisioning tool generates unique key per drone.", "done"),
     ]
 
     STATUS_BG = {"done": "E2EFDA", "todo": "FCE4D6"}
@@ -302,35 +309,36 @@ def build():
     add_heading(doc, "6. Implementation Roadmap")
     add_body(doc,
         "The work is organised into phases. Each phase builds on the previous one. "
-        "The first two phases are complete. Phase 3 is the active work."
+        "Phases 1 through 4 are complete. Phase 5 targets real hardware deployment. "
+        "Phase 6 is the final compliance test suite."
     )
     doc.add_paragraph()
 
     phases = [
         ("Phase 1 — Manufacturer Toolchain", "✅  Complete",
          "All tools needed to build and sign a secure firmware release: key generation, "
-         "checksum calculation, manifest signing, public key embedding, and bundle packaging."),
+         "checksum calculation, manifest signing, public key embedding, bundle packaging, "
+         "and full release pipeline."),
         ("Phase 2 — Firmware Security Module", "✅  Complete",
          "The security code running inside the drone firmware: the POST module that checks "
-         "firmware integrity on boot, the arming gate that blocks take-off on failure, and "
-         "the SITL (simulation) integration test that proves the end-to-end flow works."),
-        ("Phase 3 — Ground Control Software Plugin", "⏳  In Progress",
-         "Custom plugin for QGroundControl that shows live security status, lets operators "
-         "upload signed firmware bundles, view the audit log, and enforces signed-update "
-         "rejection at the drone level."),
-        ("Phase 4 — Hardware Root of Trust", "⏳  Planned (Level 1 Required)",
-         "Two parts: (1) Move the manufacturer signing key into a TPM/HSM hardware chip on "
-         "the build machine. (2) Provision each flight module with its own TPM-based device "
-         "key, certified by the manufacturer. This is required for DGCA Level 1 — without a "
-         "device key, the drone cannot sign its own runtime data (audit logs, attestations). "
-         "Also implements real in-memory hash verification on NuttX hardware."),
-        ("Phase 5 — Parameter Protection", "⏳  Planned",
-         "Prevent unauthorised changes to safety-critical flight parameters. Any write to "
-         "a protected parameter (altitude limit, geofence, speed cap) must be accompanied "
-         "by a valid manufacturer signature."),
-        ("Phase 6 — Compliance Test Suite & Report", "⏳  Planned",
-         "Full automated test suite that exercises every requirement end-to-end. Output "
-         "is a compliance report ready for DGCA submission."),
+         "firmware integrity on boot, the arming gate that blocks take-off on failure, "
+         "firmware update gatekeeper, and the SITL integration test."),
+        ("Phase 3 — Ground Control Software Plugin", "✅  Complete",
+         "Custom plugin for QGroundControl: live security status panel, secure firmware "
+         "update page (bundle verification + extraction), audit log viewer (real-time feed "
+         "+ download), and drone-side firmware update signature rejection."),
+        ("Phase 4 — Parameter Protection + Audit Logging + GCS Pairing", "✅  Complete",
+         "Zero-window compliance parameter protection (6 locked parameters), per-file RSA "
+         "audit logging (tamper-evident binary log with offline verification), and GCS-FC "
+         "pairing via MAVLink signing (per-drone key provisioning)."),
+        ("Phase 5 — Hardware Deployment", "⏳  Planned",
+         "Deploy to OrangeCube/Pixhawk hardware: public key in CRP-protected flash, real "
+         "code and data hash verification using mbedTLS on NuttX, board ID verification, "
+         "and hardware-specific testing."),
+        ("Phase 6 — Compliance Test Suite & Report", "⏳  In Progress",
+         "Full automated test suite with 260+ tests mapped to DGCA requirements. "
+         "Compliance report generator produces machine-readable JSON and human-readable "
+         "text reports for auditor submission."),
     ]
 
     for phase_title, phase_status, phase_desc in phases:
@@ -371,9 +379,13 @@ def build():
          "and uploads it. QGC and the drone both verify the manufacturer signature before "
          "flashing. An unsigned bundle is rejected with a clear error message."),
         ("Unauthorised parameter change attempt",
-         "Someone tries to change the maximum altitude via an unsigned MAVLink command. "
-         "The drone rejects the write. The event is logged to the audit log with a timestamp. "
-         "(Phase 5)"),
+         "Someone tries to change the maximum altitude via a MAVLink command. "
+         "The drone rejects the write immediately — the parameter is statically compiled "
+         "and locked. The attempt is logged to the tamper-evident audit log with a timestamp."),
+        ("Unauthorised GCS connection attempt",
+         "An operator tries to connect with a GCS that does not have the drone's signing key. "
+         "All commands are rejected because they lack valid MAVLink signatures. "
+         "Only a GCS with the matching key (provisioned during manufacturing) can communicate."),
     ]
 
     for scen_title, scen_desc in scenarios:
@@ -390,15 +402,16 @@ def build():
     add_heading(doc, "8. Glossary of Key Terms")
 
     terms = [
-        ("ECDSA P-256",      "A digital signature algorithm. The same mathematics used to secure online banking. P-256 means the key is 256 bits long — considered very strong."),
+        ("RSA-3072 / RSA-PSS", "A digital signature and encryption algorithm. RSA-3072 provides 128-bit security (recommended by NIST beyond 2030). PSS padding is the modern, provably secure signature scheme. The same family of algorithms used to secure online banking and government systems."),
         ("SHA-256",          "A fingerprinting algorithm. Given any file, it produces a unique 64-character code. If even one byte of the file changes, the fingerprint is completely different."),
-        ("Manifest",         "A small file containing the firmware fingerprints, version number, and board ID — all signed by the manufacturer. The drone keeps this as its reference."),
+        ("Manifest",         "A small file containing the firmware fingerprints, version number, and board ID — all signed by the manufacturer. The drone keeps this as its reference. 501 bytes in binary format."),
         ("POST",             "Power On Self Test. A check the drone runs automatically on every boot before allowing any flight operations."),
-        ("Manufacturer Root of Trust", "The manufacturer's private key — used to sign firmware releases and update bundles. Held on the build machine, never on the drone."),
-        ("Device Root of Trust", "A unique key held inside each drone's TPM chip. Signs data the drone generates at runtime (audit logs, boot attestations). Proves which specific drone produced which data."),
-        ("TPM 2.0",          "Trusted Platform Module. A dedicated hardware chip for storing cryptographic keys. Even if someone has physical access to the hardware, the key cannot be extracted."),
+        ("Root of Trust",    "The manufacturer's RSA-3072 keypair. Private key signs firmware releases and decrypts log signatures (never leaves the build machine). Public key is embedded in firmware for verification and log signing."),
+        ("MAVLink Signing",  "MAVLink v2 protocol feature that authenticates every message using a shared 32-byte key (HMAC-SHA256). Ensures only authorised GCS software can control the drone."),
+        ("Compliance Parameters", "Safety-critical flight parameters (max altitude, speed, geofence) that are statically compiled into the firmware and cannot be changed at runtime from any ground control station."),
         ("Arming Gate",      "The pre-flight check system in PX4. We added a new check: if POST failed, the drone cannot arm (start motors)."),
         (".fwbundle",        "Our signed firmware update package. Contains the firmware binary and a signed manifest. Cannot be tampered with without breaking the signature."),
+        ("Audit Log",        "A tamper-evident binary log of all security events (boot checks, update attempts, parameter violations). Each log file is signed using RSA encryption for offline verification."),
         ("uORB",             "PX4's internal message bus — like a notice board that different software modules post messages to. The POST result is published here so the arming gate can read it."),
         ("DGCA Level 1",     "The baseline type certification tier for drone manufacturers in India. Requires a documented chain of trust, firmware integrity checks, and secure update mechanisms."),
     ]

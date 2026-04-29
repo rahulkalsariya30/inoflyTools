@@ -45,16 +45,36 @@ firmware/build/
 *.map
 
 # =============================================================
-# QGroundControl build artifacts
+# QGroundControl fork (nested git repo, has its own remote)
 # =============================================================
-qgroundcontrol/build/
-qgroundcontrol/.qt/
+qgroundcontrol/
 
 # =============================================================
 # Signed firmware bundles (generated artifacts, not source)
 # =============================================================
 *.sfb
 *.signed
+*.fwbundle
+*.sig
+
+# =============================================================
+# Generated compliance / test artifacts
+# =============================================================
+Docs/compliance_report.json
+Docs/compliance_report.txt
+Docs/audit_log.bin
+Docs/audit_log.sig
+
+# =============================================================
+# Third-party reference / confidential docs (do not commit)
+# =============================================================
+Docs/*.pdf
+Docs/Security Requirements.docx
+
+# =============================================================
+# Local editor config
+# =============================================================
+.local-tooling/
 
 # =============================================================
 # Secrets and environment

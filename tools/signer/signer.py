@@ -17,12 +17,17 @@ WHAT gets signed?
   - The manifest is serialized to canonical JSON (sorted keys, no extra
     whitespace) before signing. This ensures the signature is the same
     regardless of how the JSON was originally formatted.
-  - ECDSA P-256 with SHA-256 (same key pair from Phase 1.1 / ROT001)
+  - RSA-3072 with PSS padding and SHA-256 (same keypair from Phase 1.1 / ROT001)
+
+WHY RSA-PSS (not PKCS#1 v1.5)?
+  - PSS is the modern, provably-secure RSA signature scheme
+  - Recommended by NIST SP 800-131A for new applications
+  - OpenSSL and mbedTLS both support RSA-PSS natively
 
 SIGNED BUNDLE FORMAT (what gets stored on the drone):
   {
       "manifest":   { ...checksum manifest from Phase 1.2... },
-      "signature":  "<base64-encoded DER signature bytes>",
+      "signature":  "<base64-encoded RSA-PSS signature bytes>",
       "signed_at":  "<ISO 8601 UTC timestamp>"
   }
   The public key is NOT included in the bundle — it is embedded in the
@@ -34,11 +39,7 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import (
-    decode_dss_signature,
-    encode_dss_signature,
-)
+from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.exceptions import InvalidSignature
 
@@ -69,7 +70,7 @@ def sign_manifest(manifest: dict, private_key_path: Path = PRIVATE_KEY_PATH) -> 
 
     Args:
         manifest: The checksum manifest dict from checksum.generate_manifest()
-        private_key_path: Path to the PEM-encoded ECDSA private key
+        private_key_path: Path to the PEM-encoded RSA private key
 
     Returns:
         A signed bundle dict containing the manifest and its signature.
@@ -88,12 +89,20 @@ def sign_manifest(manifest: dict, private_key_path: Path = PRIVATE_KEY_PATH) -> 
     # Serialize manifest to canonical bytes — this is what we sign
     manifest_bytes = _canonical_bytes(manifest)
 
-    # Sign with ECDSA P-256 + SHA-256
-    # The signature is in DER format (the standard binary encoding for ECDSA)
-    der_signature = private_key.sign(manifest_bytes, ec.ECDSA(hashes.SHA256()))
+    # Sign with RSA-PSS + SHA-256
+    # PSS is the modern provably-secure RSA signature scheme
+    # Salt length = hash length (32 bytes for SHA-256) per NIST recommendation
+    signature = private_key.sign(
+        manifest_bytes,
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH,
+        ),
+        hashes.SHA256(),
+    )
 
-    # Base64-encode the DER signature so it's safe to store in JSON
-    signature_b64 = base64.b64encode(der_signature).decode("utf-8")
+    # Base64-encode the signature so it's safe to store in JSON
+    signature_b64 = base64.b64encode(signature).decode("utf-8")
 
     signed_bundle = {
         "manifest": manifest,
@@ -112,7 +121,7 @@ def verify_bundle(signed_bundle: dict, public_key_path: Path = PUBLIC_KEY_PATH) 
 
     Args:
         signed_bundle: The dict produced by sign_manifest()
-        public_key_path: Path to the PEM-encoded ECDSA public key
+        public_key_path: Path to the PEM-encoded RSA public key
 
     Returns:
         True if the manifest was signed by the manufacturer's private key
@@ -130,11 +139,19 @@ def verify_bundle(signed_bundle: dict, public_key_path: Path = PUBLIC_KEY_PATH) 
     # Re-derive the canonical bytes from the manifest — same process as signing
     manifest_bytes = _canonical_bytes(signed_bundle["manifest"])
 
-    # Decode the base64 signature back to DER bytes
-    der_signature = base64.b64decode(signed_bundle["signature"])
+    # Decode the base64 signature
+    signature = base64.b64decode(signed_bundle["signature"])
 
     try:
-        public_key.verify(der_signature, manifest_bytes, ec.ECDSA(hashes.SHA256()))
+        public_key.verify(
+            signature,
+            manifest_bytes,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
         return True
     except InvalidSignature:
         return False

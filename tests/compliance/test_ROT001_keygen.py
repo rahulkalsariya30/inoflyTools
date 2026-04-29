@@ -10,16 +10,15 @@ Each test name starts with the requirement ID it covers.
 """
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 # Add project root to path so we can import our tools
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from tools.pki.keygen import generate_keypair
+from tools.pki.keygen import generate_keypair, RSA_KEY_SIZE
 
 
 class TestROT001_KeypairGeneration:
@@ -41,33 +40,32 @@ class TestROT001_KeypairGeneration:
         assert isinstance(public_key_pem, bytes)
 
     def test_ROT001_private_key_is_valid_pem(self):
-        """Private key must be a valid PEM-encoded ECDSA private key."""
+        """Private key must be a valid PEM-encoded RSA private key."""
         private_key_pem, _ = generate_keypair()
-        # This will raise an exception if the PEM is invalid
         private_key = serialization.load_pem_private_key(private_key_pem, password=None)
-        assert isinstance(private_key, ec.EllipticCurvePrivateKey)
+        assert isinstance(private_key, rsa.RSAPrivateKey)
 
     def test_ROT001_public_key_is_valid_pem(self):
-        """Public key must be a valid PEM-encoded ECDSA public key."""
+        """Public key must be a valid PEM-encoded RSA public key."""
         _, public_key_pem = generate_keypair()
         public_key = serialization.load_pem_public_key(public_key_pem)
-        assert isinstance(public_key, ec.EllipticCurvePublicKey)
+        assert isinstance(public_key, rsa.RSAPublicKey)
 
-    def test_ROT001_uses_P256_curve(self):
+    def test_ROT001_uses_RSA_3072(self):
         """
-        Keypair must use NIST P-256 curve (secp256r1).
-        WHY: P-256 is approved by NIST and accepted by aviation regulators.
-             It meets the SHA-2 requirement in DGCA Level 1.
+        Keypair must use RSA-3072 (128-bit security).
+        WHY: RSA-3072 is NIST-recommended for use beyond 2030 (SP 800-57).
+             Supports both signing (firmware) and encryption (log hashes).
         """
         private_key_pem, public_key_pem = generate_keypair()
 
         private_key = serialization.load_pem_private_key(private_key_pem, password=None)
         public_key  = serialization.load_pem_public_key(public_key_pem)
 
-        assert isinstance(private_key.curve, ec.SECP256R1), \
-            "Private key must use P-256 curve"
-        assert isinstance(public_key.curve, ec.SECP256R1), \
-            "Public key must use P-256 curve"
+        assert private_key.key_size == RSA_KEY_SIZE, \
+            f"Private key must be RSA-{RSA_KEY_SIZE}, got RSA-{private_key.key_size}"
+        assert public_key.key_size == RSA_KEY_SIZE, \
+            f"Public key must be RSA-{RSA_KEY_SIZE}, got RSA-{public_key.key_size}"
 
     def test_ROT001_keypair_is_mathematically_linked(self):
         """
@@ -79,12 +77,27 @@ class TestROT001_KeypairGeneration:
         private_key = serialization.load_pem_private_key(private_key_pem, password=None)
         public_key  = serialization.load_pem_public_key(public_key_pem)
 
-        # Sign some test data with private key
+        # Sign some test data with private key (RSA-PSS + SHA-256)
         test_data = b"inofly-manufacturer-test"
-        signature = private_key.sign(test_data, ec.ECDSA(hashes.SHA256()))
+        signature = private_key.sign(
+            test_data,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
 
         # Verify with public key — will raise exception if keys don't match
-        public_key.verify(signature, test_data, ec.ECDSA(hashes.SHA256()))
+        public_key.verify(
+            signature,
+            test_data,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
 
     def test_ROT001_each_call_generates_unique_keypair(self):
         """
@@ -113,8 +126,38 @@ class TestROT001_KeypairGeneration:
         public_key_2  = serialization.load_pem_public_key(public_key_pem_2)
 
         test_data = b"inofly-manufacturer-test"
-        signature = private_key_1.sign(test_data, ec.ECDSA(hashes.SHA256()))
+        signature = private_key_1.sign(
+            test_data,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
 
         # This MUST raise InvalidSignature
         with pytest.raises(InvalidSignature):
-            public_key_2.verify(signature, test_data, ec.ECDSA(hashes.SHA256()))
+            public_key_2.verify(
+                signature,
+                test_data,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH,
+                ),
+                hashes.SHA256(),
+            )
+
+    def test_ROT001_rsa_signature_is_384_bytes(self):
+        """RSA-3072 signature must be exactly 384 bytes (3072/8)."""
+        private_key_pem, _ = generate_keypair()
+        private_key = serialization.load_pem_private_key(private_key_pem, password=None)
+
+        signature = private_key.sign(
+            b"test",
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        assert len(signature) == RSA_KEY_SIZE // 8  # 3072/8 = 384

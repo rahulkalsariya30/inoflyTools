@@ -9,21 +9,16 @@ Requirement: SIG001
   - A tampered manifest must fail verification
   - A signature from a different key must fail verification
   - Signed bundle must contain the manifest and signature fields
-  - Signature must use ECDSA P-256 with SHA-256
+  - Signature must use RSA-3072 with PSS padding and SHA-256
 """
 
 import base64
 import json
 import pytest
-import zlib
 from pathlib import Path
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.exceptions import InvalidSignature
 
 from tools.signer.signer import (
     sign_manifest,
@@ -32,7 +27,7 @@ from tools.signer.signer import (
     load_signed_bundle,
     _canonical_bytes,
 )
-from tools.pki.keygen import generate_keypair
+from tools.pki.keygen import generate_keypair, RSA_KEY_SIZE
 
 
 # ---------------------------------------------------------------------------
@@ -105,11 +100,11 @@ class TestSIG001_Signing:
         except Exception:
             pytest.fail("Signature is not valid base64")
 
-    def test_SIG001_signature_is_valid_der(self, signed_bundle):
-        """Signature bytes must be valid DER-encoded ECDSA signature."""
-        der_bytes = base64.b64decode(signed_bundle["signature"])
-        # DER sequence starts with 0x30
-        assert der_bytes[0] == 0x30, "Signature is not DER encoded (should start with 0x30)"
+    def test_SIG001_signature_is_384_bytes(self, signed_bundle):
+        """RSA-3072 signature must be exactly 384 bytes (3072 / 8)."""
+        sig_bytes = base64.b64decode(signed_bundle["signature"])
+        assert len(sig_bytes) == RSA_KEY_SIZE // 8, \
+            f"Expected {RSA_KEY_SIZE // 8} bytes, got {len(sig_bytes)}"
 
     def test_SIG001_missing_private_key_raises_error(self, sample_manifest, tmp_path):
         """Must fail clearly if private key file doesn't exist."""
@@ -118,9 +113,8 @@ class TestSIG001_Signing:
 
     def test_SIG001_two_signatures_of_same_manifest_are_different(self, sample_manifest, keypair):
         """
-        ECDSA uses a random nonce per signature — the same data signed twice
+        RSA-PSS uses a random salt per signature — the same data signed twice
         produces different signatures. Both must verify correctly.
-        This is by design: deterministic signatures would be weaker.
         """
         bundle1 = sign_manifest(sample_manifest, private_key_path=keypair["private"])
         bundle2 = sign_manifest(sample_manifest, private_key_path=keypair["private"])
@@ -177,7 +171,7 @@ class TestSIG001_Verification:
     def test_SIG001_corrupted_signature_fails_verification(self, signed_bundle, keypair):
         """A randomly corrupted signature must not verify."""
         corrupted = json.loads(json.dumps(signed_bundle))
-        corrupted["signature"] = base64.b64encode(b"\x00" * 72).decode("utf-8")
+        corrupted["signature"] = base64.b64encode(b"\x00" * 384).decode("utf-8")
         result = verify_bundle(corrupted, public_key_path=keypair["public"])
         assert result is False
 

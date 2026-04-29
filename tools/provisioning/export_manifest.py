@@ -21,23 +21,23 @@ WHY re-sign in binary format?
                      = 98 bytes, always in this exact order
 
   The embedded side reconstructs this same 98-byte payload from the struct
-  fields and calls ecc_verify_hash_ex() with the stored DER signature.
+  fields and verifies the RSA-PSS signature.
 
-BINARY MANIFEST FORMAT (security_manifest_t — 188 bytes):
+BINARY MANIFEST FORMAT (security_manifest_t — 504 bytes):
   Offset  Size  Field
   ------  ----  -----
-       0     8  magic        "INOFLY01" — format identifier
-       8     1  format_ver   struct layout version (currently 1)
+       0     8  magic        "INOFLY02" — format identifier (v2 for RSA-3072)
+       8     1  format_ver   struct layout version (currently 2)
        9    32  code_hash    SHA-256 of firmware binary
       41    32  data_hash    SHA-256 of default parameter set
-      73    72  signature    DER-encoded ECDSA P-256 signature (max 72 bytes)
-     145     1  sig_len      actual signature byte count (≤ 72)
-     146     2  board_id     target hardware ID (little-endian uint16)
-     148    32  version      firmware version string, null-terminated
-     180     4  created_at   unix timestamp (little-endian uint32)
-     184     4  crc32        CRC32 of bytes 0–183 (little-endian uint32)
+      73   384  signature    RSA-3072 PSS signature (always exactly 384 bytes)
+     457     2  sig_len      actual signature byte count (384 for RSA-3072)
+     459     2  board_id     target hardware ID (little-endian uint16)
+     461    32  version      firmware version string, null-terminated
+     493     4  created_at   unix timestamp (little-endian uint32)
+     497     4  crc32        CRC32 of bytes 0–496 (little-endian uint32)
     ----
-     188     TOTAL
+     501     TOTAL
 
 The CRC32 covers the entire struct except the last 4 bytes (the CRC itself).
 It detects storage corruption — a failed CRC means the flash was corrupted,
@@ -51,7 +51,7 @@ import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes, serialization
 
 # Paths
@@ -59,18 +59,18 @@ PROJECT_ROOT     = Path(__file__).resolve().parent.parent.parent
 PRIVATE_KEY_PATH = PROJECT_ROOT / "pki" / "manufacturer" / "private" / "manufacturer_private.pem"
 
 # Binary format constants
-MAGIC           = b"INOFLY01"   # 8 bytes
-FORMAT_VERSION  = 1             # increment if struct layout changes
+MAGIC           = b"INOFLY02"   # 8 bytes — v2 for RSA-3072 manifest format
+FORMAT_VERSION  = 2             # v2: RSA-3072 signatures
 HASH_LEN        = 32            # SHA-256 output size
-SIG_MAX_LEN     = 72            # max DER-encoded ECDSA P-256 signature size
+SIG_MAX_LEN     = 384           # RSA-3072 signature size (3072/8 = 384 bytes, always exact)
 VERSION_LEN     = 32            # firmware version string buffer size
-TOTAL_SIZE      = 188           # total struct size in bytes
+TOTAL_SIZE      = 501           # total struct size in bytes
 
 # Struct pack format (little-endian, packed):
 # 8s = magic[8], B = format_ver, 32s = code_hash, 32s = data_hash,
-# 72s = signature, B = sig_len, H = board_id, 32s = version,
+# 384s = signature, H = sig_len, H = board_id, 32s = version,
 # I = created_at, I = crc32
-STRUCT_FORMAT   = "<8sB32s32s72sBH32sII"
+STRUCT_FORMAT   = "<8sB32s32s384sHH32sII"
 
 assert struct.calcsize(STRUCT_FORMAT) == TOTAL_SIZE, \
     f"Struct size mismatch: {struct.calcsize(STRUCT_FORMAT)} != {TOTAL_SIZE}"
@@ -101,12 +101,19 @@ def _build_signable_payload(code_hash: bytes, data_hash: bytes,
 def _sign_binary_payload(payload: bytes, private_key_path: Path) -> bytes:
     """
     Sign the binary signable_payload with the manufacturer private key.
-    Returns DER-encoded ECDSA P-256 signature bytes.
+    Returns RSA-PSS signature bytes (384 bytes for RSA-3072).
     """
     private_pem = Path(private_key_path).read_bytes()
     private_key = serialization.load_pem_private_key(private_pem, password=None)
-    der_signature = private_key.sign(payload, ec.ECDSA(hashes.SHA256()))
-    return der_signature
+    signature = private_key.sign(
+        payload,
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH,
+        ),
+        hashes.SHA256(),
+    )
+    return signature
 
 
 def _compute_crc32(data: bytes) -> int:
@@ -124,7 +131,7 @@ def export_binary_manifest(
     This is the main function. It:
       1. Extracts code_hash and data_hash from the bundle (hex → bytes)
       2. Builds the 98-byte signable payload
-      3. Signs the payload with the private key (binary ECDSA signature)
+      3. Signs the payload with the private key (RSA-PSS signature)
       4. Packs everything into the binary struct
       5. Appends CRC32 over the entire struct (excluding CRC field)
 
@@ -133,7 +140,7 @@ def export_binary_manifest(
         private_key_path: Path to manufacturer private key PEM
 
     Returns:
-        188-byte binary manifest ready to write to the drone's flash storage
+        501-byte binary manifest ready to write to the drone's flash storage
     """
     manifest = signed_bundle["manifest"]
 
@@ -160,17 +167,14 @@ def export_binary_manifest(
 
     # Build signable payload and sign it
     payload = _build_signable_payload(code_hash, data_hash, board_id, version)
-    der_sig  = _sign_binary_payload(payload, private_key_path)
+    sig = _sign_binary_payload(payload, private_key_path)
 
-    if len(der_sig) > SIG_MAX_LEN:
+    if len(sig) != SIG_MAX_LEN:
         raise ValueError(
-            f"Signature too long: {len(der_sig)} bytes (max {SIG_MAX_LEN}). "
-            "This should never happen with ECDSA P-256."
+            f"RSA-3072 signature must be exactly {SIG_MAX_LEN} bytes, got {len(sig)}."
         )
 
-    # Pad signature to fixed 72-byte buffer
-    sig_padded = der_sig + b"\x00" * (SIG_MAX_LEN - len(der_sig))
-    sig_len    = len(der_sig)
+    sig_len = len(sig)
 
     # Encode version string
     version_bytes = version.encode("utf-8")[:VERSION_LEN-1]
@@ -178,12 +182,12 @@ def export_binary_manifest(
 
     # Pack struct (all fields except crc32 — use 0 as placeholder)
     packed_without_crc = struct.pack(
-        "<8sB32s32s72sBH32sII",
+        STRUCT_FORMAT,
         MAGIC,
         FORMAT_VERSION,
         code_hash,
         data_hash,
-        sig_padded,
+        sig,
         sig_len,
         board_id,
         version_padded,
@@ -205,7 +209,7 @@ def export_binary_manifest(
 
 def verify_binary_manifest(binary_manifest: bytes, public_key_path: Path) -> bool:
     """
-    Verify a binary manifest's CRC and ECDSA signature.
+    Verify a binary manifest's CRC and RSA-PSS signature.
 
     This mirrors exactly what FirmwareIntegrityChecker.cpp does on the drone.
     Use this to verify a manifest before provisioning it onto a drone.
@@ -225,7 +229,7 @@ def verify_binary_manifest(binary_manifest: bytes, public_key_path: Path) -> boo
         return False
 
     # Step 2: Unpack fields
-    (magic, fmt_ver, code_hash, data_hash, sig_padded, sig_len,
+    (magic, fmt_ver, code_hash, data_hash, sig_bytes, sig_len,
      board_id, version_padded, created_at, _) = struct.unpack(STRUCT_FORMAT, binary_manifest)
 
     if magic != MAGIC:
@@ -235,13 +239,21 @@ def verify_binary_manifest(binary_manifest: bytes, public_key_path: Path) -> boo
     version_str = version_padded.rstrip(b"\x00").decode("utf-8", errors="replace")
     payload = _build_signable_payload(code_hash, data_hash, board_id, version_str)
 
-    # Step 4: Verify ECDSA signature
-    der_sig = bytes(sig_padded[:sig_len])
+    # Step 4: Verify RSA-PSS signature
+    sig = bytes(sig_bytes[:sig_len])
     public_pem = Path(public_key_path).read_bytes()
     public_key = serialization.load_pem_public_key(public_pem)
 
     try:
-        public_key.verify(der_sig, payload, ec.ECDSA(hashes.SHA256()))
+        public_key.verify(
+            sig,
+            payload,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
         return True
     except InvalidSignature:
         return False

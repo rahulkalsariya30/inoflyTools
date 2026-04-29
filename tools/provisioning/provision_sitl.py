@@ -6,7 +6,7 @@ Requirement: POST001 integration test
 
 WHY this script exists:
   FirmwareIntegrityChecker needs a real manifest.bin in SITL storage to
-  exercise the full check path (CRC + ECDSA). Without it, secure_boot
+  exercise the full check path (CRC + RSA-PSS). Without it, secure_boot
   always returns REASON_NO_MANIFEST.
 
   This script creates a test manifest signed with the real manufacturer
@@ -14,7 +14,7 @@ WHY this script exists:
   running 'secure_boot start' in SITL produces check_passed=True.
 
   NOTE: The hash comparison steps (_verify_code_hash, _verify_data_hash)
-  are stubbed in SITL (return true), so this tests the CRC and ECDSA
+  are stubbed in SITL (return true), so this tests the CRC and RSA-PSS
   paths only. Hash verification is completed in Phase 2.5 for NuttX.
 
 USAGE:
@@ -57,7 +57,7 @@ SITL_MANIFEST_ROOTFS = SITL_BUILD_DIR / "rootfs" / "inofly" / "manifest.bin"
 # We use placeholder hashes because:
 #   - There is no real firmware binary to hash in SITL
 #   - _verify_code_hash and _verify_data_hash are stubbed (return true) in SITL
-#   - What we ARE testing: CRC32 integrity + ECDSA signature verification
+#   - What we ARE testing: CRC32 integrity + RSA-PSS signature verification
 #
 # The signature covers these exact values, so if the C++ code reconstructs
 # the same payload and verifies against the baked-in public key, the check passes.
@@ -107,7 +107,7 @@ def main():
         print("[FAIL] Local verification failed — manifest will not pass on drone either.")
         sys.exit(1)
 
-    print("      [OK] CRC and ECDSA signature verified")
+    print("      [OK] CRC and RSA-PSS signature verified")
 
     # Step 3: Write to SITL storage (both headless and Gazebo paths)
     print(f"\n[3/3] Writing to SITL storage...")

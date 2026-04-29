@@ -12,9 +12,15 @@ WHY this exists:
   Also reusable as a library: CI/CD and QGC plugin can import run_pipeline()
   instead of shelling out to individual tools.
 
-USAGE:
+USAGE (SITL):
   python tools/pipeline.py firmware.px4 --output-dir release/
-  python tools/pipeline.py firmware.px4 --version 1.14.0 --board-id 140
+
+USAGE (Hardware — CubeOrange+):
+  # In WSL, extract ELF sections:
+  #   arm-none-eabi-objcopy -O binary --only-section=.text firmware.elf code.bin
+  #   arm-none-eabi-objcopy -O binary --only-section=.data firmware.elf data.bin
+  python tools/pipeline.py firmware.px4 --board-id 1063 \\
+      --code-bin code.bin --data-bin data.bin --version 1.0.0
 """
 
 import json
@@ -55,6 +61,9 @@ def run_pipeline(
     px4_path: Path,
     output_dir: Path,
     firmware_version: str = "",
+    board_id: int = None,
+    code_bin_path: Path = None,
+    data_bin_path: Path = None,
     private_key_path: Path = PRIVATE_KEY,
     public_key_path: Path = PUBLIC_KEY,
     verbose: bool = True,
@@ -68,13 +77,16 @@ def run_pipeline(
       3. Verify — confirm signature is valid before proceeding
       4. PKG001 — package into .fwbundle
       5. Verify — confirm bundle signature
-      6. PRV001 — export binary manifest (188 bytes)
+      6. PRV001 — export binary manifest (501 bytes)
       7. Verify — confirm binary manifest CRC + signature
 
     Args:
         px4_path:         Path to the .px4 firmware file
         output_dir:       Directory for all output files
         firmware_version: Override version string (default: read from .px4)
+        board_id:         Override board ID (default: read from .px4)
+        code_bin_path:    Path to extracted .text section binary (hardware mode)
+        data_bin_path:    Path to extracted .data section binary (hardware mode)
         private_key_path: Manufacturer private key
         public_key_path:  Manufacturer public key
         verbose:          Print progress to stdout
@@ -104,8 +116,15 @@ def run_pipeline(
             print(msg)
 
     # Step 1: Checksums
-    log(f"[1/7] Computing SHA-256 checksums...")
-    manifest = generate_manifest(px4_path, firmware_version=firmware_version)
+    mode = "hardware (ELF sections)" if code_bin_path else "SITL (.px4 image)"
+    log(f"[1/7] Computing SHA-256 checksums [{mode}]...")
+    manifest = generate_manifest(
+        px4_path,
+        firmware_version=firmware_version,
+        board_id=board_id,
+        code_bin_path=code_bin_path,
+        data_bin_path=data_bin_path,
+    )
     log(f"      Code: {manifest['code_checksum'][:16]}...")
     log(f"      Data: {manifest['data_checksum'][:16]}...")
 
@@ -143,12 +162,12 @@ def run_pipeline(
 
     # Step 6: Binary manifest
     binary_manifest_path = output_dir / f"{stem}_manifest.bin"
-    log(f"[6/7] Exporting binary manifest (188 bytes)...")
+    log(f"[6/7] Exporting binary manifest...")
     binary = export_binary_manifest(signed_bundle, private_key_path=private_key_path)
     save_binary_manifest(binary, binary_manifest_path)
 
     # Step 7: Verify binary manifest
-    log(f"[7/7] Verifying binary manifest (CRC + ECDSA)...")
+    log(f"[7/7] Verifying binary manifest (CRC + RSA-PSS)...")
     if not verify_binary_manifest(binary, public_key_path=public_key_path):
         raise RuntimeError("BINARY MANIFEST VERIFICATION FAILED — aborting pipeline")
     log(f"      Binary manifest valid")
@@ -180,6 +199,12 @@ if __name__ == "__main__":
     parser.add_argument("px4_file", help="Path to the .px4 firmware file")
     parser.add_argument("--output-dir", default="release", help="Output directory (default: release/)")
     parser.add_argument("--version", default="", help="Firmware version string override")
+    parser.add_argument("--board-id", type=int, default=None,
+                        help="Override board ID (e.g. 1063 for CubeOrange+)")
+    parser.add_argument("--code-bin", default=None,
+                        help="Path to extracted .text section binary (hardware mode)")
+    parser.add_argument("--data-bin", default=None,
+                        help="Path to extracted .data section binary (hardware mode)")
     parser.add_argument("--private-key", default=str(PRIVATE_KEY), help="Manufacturer private key path")
     parser.add_argument("--public-key", default=str(PUBLIC_KEY), help="Manufacturer public key path")
     args = parser.parse_args()
@@ -189,6 +214,9 @@ if __name__ == "__main__":
             px4_path=Path(args.px4_file),
             output_dir=Path(args.output_dir),
             firmware_version=args.version,
+            board_id=args.board_id,
+            code_bin_path=Path(args.code_bin) if args.code_bin else None,
+            data_bin_path=Path(args.data_bin) if args.data_bin else None,
             private_key_path=Path(args.private_key),
             public_key_path=Path(args.public_key),
         )

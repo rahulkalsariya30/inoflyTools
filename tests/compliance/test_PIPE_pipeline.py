@@ -93,8 +93,8 @@ class TestPipeline:
         assert result.fwbundle_path.suffix == ".fwbundle"
         assert result.binary_manifest_path.suffix == ".bin"
 
-    def test_PIPE_binary_manifest_is_188_bytes(self, fake_px4, temp_keys, tmp_path):
-        """Binary manifest is exactly 188 bytes (security_manifest_t struct)."""
+    def test_PIPE_binary_manifest_is_correct_size(self, fake_px4, temp_keys, tmp_path):
+        """Binary manifest must match TOTAL_SIZE (security_manifest_t struct)."""
         private_key, public_key = temp_keys
         output_dir = tmp_path / "release"
 
@@ -110,7 +110,7 @@ class TestPipeline:
         assert len(binary) == TOTAL_SIZE
 
     def test_PIPE_binary_manifest_has_correct_magic(self, fake_px4, temp_keys, tmp_path):
-        """Binary manifest starts with INOFLY01 magic."""
+        """Binary manifest starts with INOFLY02 magic (v2 RSA-3072)."""
         private_key, public_key = temp_keys
         output_dir = tmp_path / "release"
 
@@ -123,7 +123,7 @@ class TestPipeline:
         )
 
         binary = result.binary_manifest_path.read_bytes()
-        assert binary[:8] == b"INOFLY01"
+        assert binary[:8] == b"INOFLY02"
 
     def test_PIPE_all_artifacts_independently_verifiable(self, fake_px4, temp_keys, tmp_path):
         """Each artifact can be verified independently after pipeline."""

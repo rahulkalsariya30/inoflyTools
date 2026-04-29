@@ -4,10 +4,10 @@ tests/compliance/test_PRV001_export_manifest.py
 Compliance tests for PRV001 — Binary manifest export for drone provisioning
 
 Requirement: PRV001
-  - Binary manifest must be exactly 188 bytes
-  - Must contain correct magic bytes "INOFLY01"
+  - Binary manifest must be exactly 501 bytes (v2 format with RSA-3072)
+  - Must contain correct magic bytes "INOFLY02"
   - CRC32 must cover all fields except itself
-  - ECDSA signature must be verifiable with manufacturer public key
+  - RSA-PSS signature must be verifiable with manufacturer public key
   - Tampered fields must fail verification
   - Must reject oversized firmware version strings safely
 """
@@ -31,8 +31,6 @@ from tools.provisioning.export_manifest import (
     MAGIC, FORMAT_VERSION, HASH_LEN, SIG_MAX_LEN, VERSION_LEN, TOTAL_SIZE, STRUCT_FORMAT,
 )
 from tools.pki.keygen import generate_keypair
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import serialization
 
 
 # ---------------------------------------------------------------------------
@@ -79,14 +77,14 @@ def binary_manifest(sample_bundle, keypair):
 
 class TestPRV001_BinaryFormat:
 
-    def test_PRV001_output_is_exactly_188_bytes(self, binary_manifest):
-        assert len(binary_manifest) == 188
+    def test_PRV001_output_is_exactly_501_bytes(self, binary_manifest):
+        assert len(binary_manifest) == TOTAL_SIZE
 
     def test_PRV001_starts_with_magic_bytes(self, binary_manifest):
-        assert binary_manifest[:8] == b"INOFLY01"
+        assert binary_manifest[:8] == MAGIC
 
-    def test_PRV001_format_version_is_1(self, binary_manifest):
-        assert binary_manifest[8] == 1
+    def test_PRV001_format_version_is_2(self, binary_manifest):
+        assert binary_manifest[8] == FORMAT_VERSION
 
     def test_PRV001_code_hash_is_at_correct_offset(self, sample_bundle, binary_manifest):
         """code_hash starts at byte 9 and is 32 bytes."""
@@ -100,19 +98,28 @@ class TestPRV001_BinaryFormat:
         stored = binary_manifest[41:73]
         assert stored == expected
 
+    def test_PRV001_signature_is_384_bytes(self, binary_manifest):
+        """RSA-3072 signature at offset 73, always exactly 384 bytes."""
+        sig_bytes = binary_manifest[73:73 + SIG_MAX_LEN]
+        assert len(sig_bytes) == 384
+        # sig_len field (uint16 at offset 457) should be 384
+        sig_len = struct.unpack_from("<H", binary_manifest, 73 + SIG_MAX_LEN)[0]
+        assert sig_len == 384
+
     def test_PRV001_board_id_is_stored_correctly(self, sample_bundle, keypair):
-        """board_id stored as little-endian uint16 at offset 146."""
+        """board_id stored as little-endian uint16 at offset 459."""
         bundle = dict(sample_bundle)
         bundle["manifest"] = dict(sample_bundle["manifest"])
         bundle["manifest"]["board_id"] = 50
         binary = export_binary_manifest(bundle, private_key_path=keypair["private"])
-        board_id_bytes = binary[146:148]
+        # board_id offset: 8 + 1 + 32 + 32 + 384 + 2 = 459
+        board_id_bytes = binary[459:461]
         assert struct.unpack("<H", board_id_bytes)[0] == 50
 
     def test_PRV001_version_string_is_null_terminated(self, binary_manifest):
         """Version field must be null-terminated within the 32-byte buffer."""
-        version_field = binary_manifest[148:180]
-        # Find null terminator
+        # version offset: 459 + 2 = 461
+        version_field = binary_manifest[461:461 + VERSION_LEN]
         assert b"\x00" in version_field
 
     def test_PRV001_struct_format_size_matches_total(self):
@@ -128,22 +135,22 @@ class TestPRV001_CRC:
 
     def test_PRV001_crc32_is_at_last_4_bytes(self, binary_manifest):
         """CRC32 field is the last 4 bytes of the struct."""
-        stored_crc   = struct.unpack_from("<I", binary_manifest, 184)[0]
-        computed_crc = _compute_crc32(binary_manifest[:184])
+        stored_crc   = struct.unpack_from("<I", binary_manifest, TOTAL_SIZE - 4)[0]
+        computed_crc = _compute_crc32(binary_manifest[:TOTAL_SIZE - 4])
         assert stored_crc == computed_crc
 
     def test_PRV001_single_byte_flip_changes_crc(self, binary_manifest):
         """Any single byte change in the manifest should change the CRC."""
         tampered = bytearray(binary_manifest)
         tampered[10] ^= 0xFF  # flip a byte in code_hash area
-        stored_crc   = struct.unpack_from("<I", bytes(tampered), 184)[0]
-        computed_crc = _compute_crc32(bytes(tampered)[:184])
+        stored_crc   = struct.unpack_from("<I", bytes(tampered), TOTAL_SIZE - 4)[0]
+        computed_crc = _compute_crc32(bytes(tampered)[:TOTAL_SIZE - 4])
         assert stored_crc != computed_crc
 
     def test_PRV001_crc_covers_all_fields_except_itself(self, binary_manifest):
-        """CRC must be over bytes 0-183, not including bytes 184-187."""
-        expected_crc = zlib.crc32(binary_manifest[:184]) & 0xFFFFFFFF
-        stored_crc   = struct.unpack_from("<I", binary_manifest, 184)[0]
+        """CRC must be over bytes 0 to TOTAL_SIZE-5, not including last 4 bytes."""
+        expected_crc = zlib.crc32(binary_manifest[:TOTAL_SIZE - 4]) & 0xFFFFFFFF
+        stored_crc   = struct.unpack_from("<I", binary_manifest, TOTAL_SIZE - 4)[0]
         assert stored_crc == expected_crc
 
 
@@ -170,8 +177,8 @@ class TestPRV001_Signature:
         tampered[9] ^= 0xFF  # flip first byte of code_hash
 
         # Fix the CRC so only signature fails (not CRC)
-        new_crc = _compute_crc32(bytes(tampered)[:184])
-        struct.pack_into("<I", tampered, 184, new_crc)
+        new_crc = _compute_crc32(bytes(tampered)[:TOTAL_SIZE - 4])
+        struct.pack_into("<I", tampered, TOTAL_SIZE - 4, new_crc)
 
         result = verify_binary_manifest(bytes(tampered), keypair["public"])
         assert result is False
@@ -181,8 +188,8 @@ class TestPRV001_Signature:
         tampered = bytearray(binary_manifest)
         tampered[41] ^= 0xFF  # flip first byte of data_hash
 
-        new_crc = _compute_crc32(bytes(tampered)[:184])
-        struct.pack_into("<I", tampered, 184, new_crc)
+        new_crc = _compute_crc32(bytes(tampered)[:TOTAL_SIZE - 4])
+        struct.pack_into("<I", tampered, TOTAL_SIZE - 4, new_crc)
 
         result = verify_binary_manifest(bytes(tampered), keypair["public"])
         assert result is False
@@ -190,7 +197,7 @@ class TestPRV001_Signature:
     def test_PRV001_corrupted_crc_fails_before_signature_check(self, binary_manifest, keypair):
         """Bad CRC should fail immediately — no need to check signature."""
         tampered = bytearray(binary_manifest)
-        tampered[185] ^= 0xFF  # flip a byte in CRC field
+        tampered[TOTAL_SIZE - 3] ^= 0xFF  # flip a byte in CRC field
         result = verify_binary_manifest(bytes(tampered), keypair["public"])
         assert result is False
 
@@ -202,8 +209,8 @@ class TestPRV001_Signature:
         """Wrong magic bytes mean this is not our manifest format."""
         tampered = bytearray(binary_manifest)
         tampered[:8] = b"WRONGMAG"
-        new_crc = _compute_crc32(bytes(tampered)[:184])
-        struct.pack_into("<I", tampered, 184, new_crc)
+        new_crc = _compute_crc32(bytes(tampered)[:TOTAL_SIZE - 4])
+        struct.pack_into("<I", tampered, TOTAL_SIZE - 4, new_crc)
         result = verify_binary_manifest(bytes(tampered), keypair["public"])
         assert result is False
 
