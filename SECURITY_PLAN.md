@@ -54,7 +54,7 @@ Based on the the audited reference-audited compliance documents (the audited ref
 | LOG001 | Per-file RSA signed audit log              | Audit Logging      | ✅ Done (SITL)  |
 | UPD001 | Drone rejects unsigned firmware update    | Secure Update      | ✅ Done        |
 | PAIR001| GCS-FC pairing (MAVLink signing)          | GCS Locking        | ✅ Done (SITL)  |
-| BOOT001| Signed bootloader — verifies firmware sig on boot and pre-flash | Secure Boot   | ⏳ Planned     |
+| BOOT001| Verifying bootloader — checks firmware signature on boot and pre-flash; bootloader integrity guaranteed by RDP L2 (BOOT003), not by runtime sig-check | Secure Boot   | ⏳ Planned     |
 | BOOT002| Manufacturer public key in STM32 OTP (hardware-locked)          | Root of Trust | ⏳ Planned (HW)|
 | BOOT003| RDP Level 2 burn — chip-level DFU/debug lockdown                | Tamper Resist | ⏳ Planned (HW)|
 
@@ -210,7 +210,20 @@ infrastructure avoids building a custom authentication protocol.
 without signing. This enables manufacturer maintenance access via direct
 USB connection, while all wireless/telemetry links require signing.
 
-### BOOT001 — Signed bootloader (closes Path A / DFU bypass)
+### BOOT001 — Verifying bootloader (closes Path A / DFU bypass)
+
+**Naming note.** "Signed bootloader" in industry literature usually means a
+bootloader whose own signature is verified by something below it — typically
+an authenticating Boot ROM in silicon (Apple iPhone, Android with Secure SoC,
+STM32MPU, STM32H5 with RSS). The STM32H743/H753 used on CubeOrange+ does
+**not** have such a Boot ROM — its system bootloader is a DFU loader, not a
+verifier. Our BOOT001 is therefore a **verifying bootloader** (it checks the
+firmware's signature) rather than a *signed-and-verified-at-boot* bootloader.
+The bootloader's own integrity is guaranteed not by a runtime cryptographic
+check, but by RDP Level 2 (BOOT003) physically preventing replacement after
+factory provisioning. We additionally sign the bootloader binary at build
+time so factory-flashing tools can verify it before programming, but no
+runtime check on this signature happens on this chip.
 
 **The gap this closes.** UPD001 protects the MAVLink-FTP secure update path
 (Path B). The stock STM32 DFU bootloader (Path A — USB + BOOT button)
@@ -245,11 +258,17 @@ On firmware update (Path A — DFU):
 - Embed mbedTLS signature-verification primitives in bootloader
 - Add OTP-read driver to bootloader (BOOT002 dependency)
 - Hook signature verification into both boot path and flash-write path
+- Sign the bootloader binary at build time using the manufacturer key
+  (build-time integrity for factory-flashing tools — no runtime check
+  on STM32H743, but standard practice and forward-compatible with chips
+  that do have authenticating Boot ROM)
 
 **Residual risk (must be documented for auditor):** without RDP Level 2,
-an attacker can DFU-flash a *malicious bootloader* that skips sig-check.
-BOOT003 closes this at the hardware level. BOOT001 alone is acceptable
-for dev boards and SITL audit demos; production units require BOOT003.
+an attacker can DFU-flash a *malicious bootloader* that skips sig-check —
+the STM32H743 has no Boot ROM that would catch this at the chip level.
+BOOT003 closes this gap at the hardware level by disabling DFU writes
+entirely. BOOT001 alone is acceptable for dev boards and SITL audit demos;
+production units require BOOT003.
 
 ### BOOT002 — Manufacturer public key in OTP
 
