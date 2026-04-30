@@ -319,6 +319,64 @@ The bootloader's integrity is provided by:
 
 The end property is the same; the mechanism differs from Apple/Android.
 
+### 5.5 Why POST and RDP L2 are both needed
+
+A natural question: if RDP Level 2 prevents anyone from writing to flash,
+why do we still need POST to verify firmware integrity at every boot?
+Doesn't RDP L2 already guarantee that what's in flash is what we put
+there?
+
+**Short answer: RDP L2 prevents unauthorized external writes; POST
+verifies that what actually got executed matches what we expect. They
+protect against different failure modes and together provide defense
+in depth.**
+
+#### Five failure modes RDP L2 cannot detect
+
+| # | Failure mode | Why RDP L2 misses it | Why POST catches it |
+|---|---|---|---|
+| 1 | Legitimate firmware update landed corrupt (interrupted write, MAVLink-FTP transmission error) | RDP L2 sees an authorized internal write — no anomaly to flag | Bootloader sig-verify + POST hash recomputation fail; drone refuses to arm |
+| 2 | Bit rot over fleet lifetime (cosmic ray, temperature cycling, flash wear) | RDP L2 only watches write attempts, not stored-state integrity | SHA-256 mismatch detected at every boot |
+| 3 | Wrong manifest installed on right firmware (factory or fleet-management error) | Both manifest and firmware are individually signed correctly | POST004 board_id check catches the chip-vs-manifest mismatch |
+| 4 | Lab-grade defeat of RDP L2 (chip decap, advanced fault injection — out of Level 1 scope) | If RDP L2 is bypassed, attacker can write flash | Bootloader still requires a manufacturer-signed firmware (signature impossible without private key) |
+| 5 | Factory provisioning window (chip is at RDP 0 between firmware-flash and RDP-L2-burn) | RDP L2 isn't burned yet — no protection | POST runs on first boot; if firmware or manifest are wrong, factory tooling sees the failure before locking the chip |
+
+#### Three structural reasons POST is required regardless
+
+POST isn't a redundant check layered on top of RDP — it's a structural
+component the rest of the system depends on:
+
+| # | Structural role | What breaks without POST |
+|---|---|---|
+| A | **The arming gate's input** — `commander` reads `firmware_integrity_status` uORB to decide whether to allow arming (ARM001) | No publisher of `firmware_integrity_status` → ARM001 has nothing to gate on → drone arms with any firmware state |
+| B | **The audit log's record of integrity events** — every boot writes a `POST_RESULT` entry (LOG001) | Audit log is silent on the most important security event of every flight; auditor has no boot-history record |
+| C | **The auditor-visible runtime evidence** — RDP L2 is invisible from outside (no easy way to confirm it's burned without specialized tooling); POST publishes live `firmware_integrity_status` viewable in QGC | Auditor cannot see runtime proof that integrity is being verified; only static evidence remains |
+
+#### How the layers stack
+
+```
+RDP L2          → external write paths are dead          (preventive, hardware)
+   ↓
+Bootloader      → firmware signature verified pre-launch (cryptographic, runtime)
+   ↓
+POST            → manifest + checksums + board_id        (cryptographic, runtime, auditable)
+   ↓
+ARM gate        → preflight refuses if POST failed       (operational)
+   ↓
+Audit log       → POST_RESULT recorded per boot          (evidence)
+```
+
+Each layer covers a different failure mode. Removing POST in favor of
+"RDP L2 is enough" would break the arming gate (no consumer for the
+integrity status), break the audit log (no `POST_RESULT` entries),
+lose visibility for the auditor, lose detection of all non-malicious
+corruption (bit rot, partial updates, manifest mismatches), and reduce
+the chain to a single hardware layer with no runtime check on what
+actually got executed.
+
+**RDP L2 prevents unauthorized writes. POST verifies what got
+executed. Both are required.**
+
 ---
 
 ## 6. What gets signed, by whom, verified where
@@ -465,6 +523,129 @@ must be gated.
 After Phase 5b, **every byte of code the CPU executes was signed by
 the manufacturer's RSA-3072 private key**, regardless of which path
 delivered it.
+
+### 8.4 How updates work on a chip locked by RDP L2
+
+A common question: "If RDP L2 blocks all flash writes, how do firmware
+updates get installed?" The answer hinges on a critical distinction
+RDP makes that's easy to miss.
+
+**RDP L2 blocks EXTERNAL writes (DFU bootloader, SWD/JTAG debugger).
+It does NOT block writes initiated by RUNNING TRUSTED FIRMWARE on the
+chip itself.**
+
+| Who's writing | Mechanism | Blocked by RDP L2? |
+|---|---|---|
+| Host PC via DFU bootloader (`dfu-util` etc.) | External — USB → ROM bootloader → flash peripheral | ✅ Yes |
+| Debug probe via SWD/JTAG | External — debug interface → flash peripheral | ✅ Yes |
+| Running PX4 firmware writing to flash | Internal — CPU executes flash-write instructions on the FLASH peripheral | ❌ No, allowed |
+
+This is the same model every modern locked-down device uses (iPhone,
+Android with locked bootloader, Tesla, modern automotive ECUs). The
+chip is "selectively writable by entities holding the right key" —
+not "completely write-protected."
+
+#### The actual update flow on a locked chip
+
+```
+1. Manufacturer signs new firmware bundle (.fwbundle) offline with private key
+2. Operator downloads .fwbundle, opens QGroundControl
+3. QGC client-side verifies bundle signature (UPD001 client check)
+4. QGC uploads .fwbundle to FC via MAVLink-FTP
+   ↓
+5. Running PX4 firmware on FC receives the bundle via FirmwareUpdateGatekeeper
+6. PX4 firmware verifies the bundle signature using mbedTLS + embedded
+   manufacturer pubkey (UPD001 drone-side check)
+7. PX4 firmware writes the new firmware to a STAGING flash region using
+   the STM32 HAL flash-write functions
+   ← THIS WRITE WORKS even with RDP L2 burned, because it is initiated
+     by trusted firmware already running on the CPU itself
+8. PX4 firmware writes the new manifest.bin to its flash region
+9. PX4 firmware sets a "boot from staged firmware on next reset" flag
+10. FC reboots
+   ↓
+11. Bootloader runs (the same locked-down bootloader from factory)
+12. Bootloader sees the staged-firmware flag, points at the new region
+13. Bootloader hashes the new firmware, verifies signature against OTP pubkey
+14a. PASS → bootloader launches new firmware. Update successful.
+14b. FAIL → bootloader rolls back to previous firmware (A/B partition pattern)
+```
+
+The crucial security property: **the only entity that can deliver a
+working firmware update is one holding the manufacturer's RSA-3072
+private key.** Even though RDP L2 allows internal writes, an attacker
+cannot push an update because:
+
+- They cannot sign the bundle (no private key)
+- The running firmware refuses to write the bytes if signature check
+  fails (UPD001 step 6)
+- The bootloader refuses to launch the new firmware if signature check
+  fails (BOOT001, step 13)
+- Both verifications use the OTP-resident pubkey, which cannot be
+  replaced
+
+The update path is open *for legitimate updates* and closed *for
+unauthorized ones* — the property we want.
+
+#### What CANNOT be updated post-RDP-L2
+
+Some flash regions need additional protection beyond RDP — using
+**WRP (Write Protection)**, a separate per-sector option-byte
+setting that blocks ALL writers including running firmware:
+
+| Region | Protection | Updatable post-RDP-L2? |
+|---|---|---|
+| Application firmware (~1.5 MB) | RDP L2 only — no WRP | ✅ Yes (via UPD001) |
+| `manifest.bin` region | RDP L2 only — no WRP | ✅ Yes (via UPD001) |
+| Staging region (A/B partition) | RDP L2 only — no WRP | ✅ Yes (where new firmware lands during update) |
+| Audit log region | RDP L2 only — no WRP | ✅ Yes (firmware appends entries) |
+| **Bootloader region (~128 KB)** | RDP L2 + **WRP** | ❌ **No — deliberately unupdatable** |
+| OTP pubkey | Hardware write-once silicon fuses | ❌ No |
+| RDP setting in option bytes | Frozen by RDP L2 itself | ❌ No |
+
+The **bootloader region is intentionally permanent** on production
+units. WRP-locking the bootloader sectors means even running firmware
+cannot replace the bootloader. The trade-offs:
+
+- **Pro:** the trust anchor of the chain (the bootloader that does
+  verification) cannot be replaced by anyone, ever — not by an
+  attacker, not even by us
+- **Pro:** a compromise of the firmware-signing process cannot be
+  weaponized to push a malicious bootloader to deployed units
+- **Con:** if a critical bug is found in the bootloader after
+  deployment, deployed units cannot be patched; affected units
+  must be field-replaced
+
+We accept this trade-off and mitigate the con by:
+- Keeping the bootloader **small and simple** (~10K LOC max — much
+  less code surface than firmware)
+- **Extra rigorous review** on bootloader code (security-focused audit
+  before factory burn)
+- Designing the bootloader as a **rarely-changing** component (just
+  verify-and-launch logic, no feature growth)
+- Using **mbedTLS** (well-tested crypto library, not in-house code)
+
+This is the same trade-off iPhones, Teslas, and Android devices accept
+for their first-stage bootloaders. The immutable trust anchor is a
+feature, not a limitation.
+
+#### Phase 5b implication
+
+Phase 5b's BOOT001 (verifying bootloader) and BOOT003 (RDP L2 burn)
+together require the bootloader region to be WRP-locked as part of the
+factory provisioning sequence. The full sequence:
+
+1. Flash bootloader to chip
+2. Flash application firmware
+3. Flash manifest.bin
+4. Program OTP with manufacturer pubkey (BOOT002)
+5. Burn WRP on bootloader sectors (locks bootloader against all writers)
+6. Burn RDP Level 2 (closes external write paths)
+
+After step 6, the chip is in production mode: the bootloader is
+permanent, OTP is permanent, RDP is permanent, and the only way to
+update the application firmware is via UPD001 with a manufacturer-signed
+bundle.
 
 ---
 
@@ -902,3 +1083,4 @@ For project-specific requirement IDs (CHK001, BOOT001, etc.), see
 | Version | Date | Change |
 |---|---|---|
 | 1.0 | 2026-04-29 | Initial lockdown. Captures all architectural decisions made through ADR-012. |
+| 1.1 | 2026-04-29 | Added §5.5 (Why POST and RDP L2 are both needed) and §8.4 (How updates work on a chip locked by RDP L2 — internal-vs-external writes, WRP-locked bootloader region, factory provisioning sequence). No architectural changes; expansions of existing decisions to address common auditor questions. |
