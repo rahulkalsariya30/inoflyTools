@@ -1,7 +1,24 @@
 # Drone Security Compliance Plan
 # DGCA UAS Type Certification — Level 1 (Firmware Manufacturer)
 
-Last updated: 2026-04-28
+Last updated: 2026-05-04
+
+> **🟡 PARTIALLY AMENDED — 2026-05-04 (architecture pivot).** The
+> Phase 5b plan was originally OTP-pubkey + RDP Level 2 burn
+> (BOOT002 / BOOT003). Those two requirements are **retired** because
+> the CubeOrange+ carriers we ship have no externally accessible BOOT0
+> button — OTP write and RDP burn require BOOT0 + SWD access during
+> factory provisioning, which is operationally infeasible without
+> breaking Hex's factory seal. They are replaced by an ArduPilot-style
+> bootstrap-trust chain plus tamper-evident sealing. See
+> [Docs/ARCHITECTURE.md §12 ADR-013/014/015](Docs/ARCHITECTURE.md) for
+> the architectural decisions and rationale.
+>
+> **Convention used in this document:** retired material is rendered
+> in `~~strikethrough~~` immediately followed by a ✅ **CURRENT** block
+> describing what we are actually doing. This preserves traceability —
+> a reviewer can see what was retired, what replaced it, and why. The
+> same convention is used in `Docs/ARCHITECTURE.md`.
 
 ---
 
@@ -26,12 +43,34 @@ Based on the the audited reference-audited compliance documents (the audited ref
 - Public key embedded in firmware as C header (`manufacturer_pubkey.h`) — used by app firmware
 - RSA enables both signing (firmware) AND encryption (log hashes) with one keypair
 
-**Hardware root of trust (CubeOrange+ / STM32H7) — Phase 5 target:**
-- Full public key (~422 bytes DER) written to STM32 OTP (write-once, hardware-locked)
-- Bootloader reads public key **from OTP** on every boot — no key embedded in bootloader code
-- RDP Level 2 (irreversible) blocks DFU writes, SWD/JTAG, and external flash read
-- Together, OTP + RDP make the root of trust immutable post-factory
-- See BOOT001 / BOOT002 / BOOT003 below
+~~**Hardware root of trust (CubeOrange+ / STM32H7) — Phase 5 target:**~~
+- ~~Full public key (~422 bytes DER) written to STM32 OTP (write-once, hardware-locked)~~
+- ~~Bootloader reads public key **from OTP** on every boot — no key embedded in bootloader code~~
+- ~~RDP Level 2 (irreversible) blocks DFU writes, SWD/JTAG, and external flash read~~
+- ~~Together, OTP + RDP make the root of trust immutable post-factory~~
+- ~~See BOOT001 / BOOT002 / BOOT003 below~~
+
+⚠️ **AMENDED 2026-05-04 (ADR-013).** The OTP + RDP plan is retired —
+the CubeOrange+ carriers we use have no accessible BOOT0, making OTP
+write / RDP burn operationally infeasible without breaking the Hex
+factory seal.
+
+✅ **CURRENT — Bootstrap-trust + tamper-evident sealing (CubeOrange+ / STM32H7), Phase 5b target:**
+- RSA-3072 manufacturer pubkey is **embedded in the bootloader binary**
+  (and continues to be embedded in the app fw for UPD001 / manifest
+  verification). Single source of truth: `pki/manufacturer/public/manufacturer_public.pem`.
+- Bootloader integrity is provided by:
+  1. **Bootstrap-trust:** the only path that writes sector 0 is
+     `bl_update`, initiated from a *running, manufacturer-signed* app
+     fw whose ROMFS contains the signed bootloader image (BOOT006).
+  2. **Software DFU-refuse:** the secure bootloader refuses to enter
+     DFU mode (BOOT005), so an attacker with USB cannot route around
+     `bl_update`.
+  3. **Tamper-evident sealing:** airframe + Cube enclosure are sealed
+     with serialized seals before shipping (BOOT007); reaching SWD/JTAG
+     to bypass `bl_update` requires visibly breaking the seal.
+- See BOOT001 / BOOT005 / BOOT006 / BOOT007 below. (BOOT002 and BOOT003
+  retained as struck-through historical entries for traceability.)
 
 ---
 
@@ -54,9 +93,13 @@ Based on the the audited reference-audited compliance documents (the audited ref
 | LOG001 | Per-file RSA signed audit log              | Audit Logging      | ✅ Done (SITL)  |
 | UPD001 | Drone rejects unsigned firmware update    | Secure Update      | ✅ Done        |
 | PAIR001| GCS-FC pairing (MAVLink signing)          | GCS Locking        | ✅ Done (SITL)  |
-| BOOT001| Verifying bootloader — checks firmware signature on boot and pre-flash; bootloader integrity guaranteed by RDP L2 (BOOT003), not by runtime sig-check | Secure Boot   | ⏳ Planned     |
-| BOOT002| Manufacturer public key in STM32 OTP (hardware-locked)          | Root of Trust | ⏳ Planned (HW)|
-| BOOT003| RDP Level 2 burn — chip-level DFU/debug lockdown                | Tamper Resist | ⏳ Planned (HW)|
+| BOOT001| Verifying bootloader — checks firmware signature on boot and pre-flash. ⚠️ **AMENDED 2026-05-04 (ADR-013):** bootloader integrity is now provided by bootstrap-trust (BOOT006) + software DFU-refuse (BOOT005) + tamper-evident seal (BOOT007), not by RDP L2. The verifying-bootloader check itself (BOOT001) is unchanged and still load-bearing. | Secure Boot | ⏳ Planned |
+| ~~BOOT002~~ | ~~Manufacturer public key in STM32 OTP (hardware-locked)~~ ⚠️ **RETIRED 2026-05-04 (ADR-013).** ✅ **CURRENT:** pubkey is embedded in the bootloader binary; OTP is not used. | ~~Root of Trust~~ | 🚫 Retired |
+| ~~BOOT003~~ | ~~RDP Level 2 burn — chip-level DFU/debug lockdown~~ ⚠️ **RETIRED 2026-05-04 (ADR-013).** ✅ **CURRENT:** Path A is closed by software DFU-refuse (BOOT005); SWD/JTAG access is gated by tamper-evident sealing (BOOT007). | ~~Tamper Resist~~ | 🚫 Retired |
+| BOOT004| Flash encryption (AES) — productization / Level 2/3 only         | Confidentiality | ⏳ Deferred (ADR-004) |
+| BOOT005| Software DFU-refuse in the secure bootloader (closes Path A)     | Secure Boot     | ⏳ Planned (Phase 5b) |
+| BOOT006| `bl_update` / ROMFS-bundled secure bootloader (install path; bootstrap-trust root) | Secure Boot | ⏳ Planned (Phase 5b) |
+| BOOT007| Tamper-evident sealing + STM32 96-bit UID + seal-serial tracking (compensating control for the physical-attacker class) | Tamper Resist | ⏳ Planned (Phase 5b) |
 
 ---
 
@@ -219,11 +262,20 @@ STM32MPU, STM32H5 with RSS). The STM32H743/H753 used on CubeOrange+ does
 **not** have such a Boot ROM — its system bootloader is a DFU loader, not a
 verifier. Our BOOT001 is therefore a **verifying bootloader** (it checks the
 firmware's signature) rather than a *signed-and-verified-at-boot* bootloader.
-The bootloader's own integrity is guaranteed not by a runtime cryptographic
-check, but by RDP Level 2 (BOOT003) physically preventing replacement after
-factory provisioning. We additionally sign the bootloader binary at build
-time so factory-flashing tools can verify it before programming, but no
-runtime check on this signature happens on this chip.
+
+⚠️ **AMENDED 2026-05-04 (ADR-013).** ~~The bootloader's own integrity is
+guaranteed not by a runtime cryptographic check, but by RDP Level 2
+(BOOT003) physically preventing replacement after factory provisioning.~~
+✅ **CURRENT:** the bootloader's own integrity is guaranteed by
+**bootstrap-trust + tamper-evident sealing** — sector 0 can only be
+written via `bl_update` from a running, manufacturer-signed app fw
+(BOOT006), DFU mode is software-refused by the secure bootloader (BOOT005),
+and SWD/JTAG access requires breaking the airframe + Cube seal (BOOT007).
+The mechanism differs from RDP L2; the end property — "the bootloader on
+a deployed unit is the bootloader the manufacturer intended" — is the
+same. We additionally sign the bootloader binary at build time so factory
+tooling can verify it before programming, but no runtime check on this
+signature happens on this chip.
 
 **The gap this closes.** UPD001 protects the MAVLink-FTP secure update path
 (Path B). The stock STM32 DFU bootloader (Path A — USB + BOOT button)
@@ -235,9 +287,10 @@ The bootloader becomes the verification authority for both paths:
 
 ```
 On every boot (POST):
-  1. Bootloader reads manufacturer public key from OTP (BOOT002)
+  1. Bootloader uses its embedded RSA-3072 manufacturer pubkey
+     (compiled into the bootloader binary — ADR-013)
   2. Bootloader hashes app firmware in flash (SHA-256)
-  3. Bootloader verifies firmware signature using OTP pubkey
+  3. Bootloader verifies firmware signature using embedded pubkey
   4. PASS → jump to app firmware
      FAIL → refuse to launch, log to flash, show error indicator
 
@@ -247,91 +300,238 @@ On firmware update (Path B — MAVLink-FTP):
   3. Bootloader runs POST on new firmware before launch
 
 On firmware update (Path A — DFU):
-  - With RDP Level 2 (BOOT003): chip refuses DFU writes entirely
-  - Without RDP (dev boards): firmware lands in flash, but POST in
+  - Production secure bootloader: software-refuses DFU mode entry (BOOT005)
+  - Dev builds (no DFU-refuse): firmware lands in flash, but POST in
     bootloader fails sig-check on next boot → won't run
 ```
 
 **Implementation:**
 - Patch the PX4 bootloader source (separate project from main firmware,
   located in PX4-Autopilot's bootloader fork — confirm path in WSL)
-- Embed mbedTLS signature-verification primitives in bootloader
-- Add OTP-read driver to bootloader (BOOT002 dependency)
-- Hook signature verification into both boot path and flash-write path
+- Embed libtomcrypt RSA-PSS / SHA-256 primitives in bootloader (Path C —
+  libtomcrypt is already linked into NuttX; no new dependency on hardware)
+- Embed manufacturer RSA-3072 pubkey directly in bootloader binary
+  (compiled-in symbol, sourced from `pki/manufacturer/public/manufacturer_public.pem`)
+- Hook signature verification into the boot path (firmware-launch decision)
 - Sign the bootloader binary at build time using the manufacturer key
-  (build-time integrity for factory-flashing tools — no runtime check
-  on STM32H743, but standard practice and forward-compatible with chips
-  that do have authenticating Boot ROM)
+  (build-time integrity for factory tooling — no runtime check on
+  STM32H743, but forward-compatible with chips that do have an
+  authenticating Boot ROM)
 
-**Residual risk (must be documented for auditor):** without RDP Level 2,
-an attacker can DFU-flash a *malicious bootloader* that skips sig-check —
-the STM32H743 has no Boot ROM that would catch this at the chip level.
-BOOT003 closes this gap at the hardware level by disabling DFU writes
-entirely. BOOT001 alone is acceptable for dev boards and SITL audit demos;
-production units require BOOT003.
+**Residual risk (must be documented for auditor):** without external write
+protection of sector 0, an attacker who can write sector 0 can replace the
+bootloader with one that skips sig-check. The STM32H743 has no Boot ROM
+that would catch this at the chip level. ⚠️ **AMENDED 2026-05-04:**
+~~BOOT003 closes this gap at the hardware level by disabling DFU writes
+entirely.~~ ✅ **The combination of BOOT005 (software DFU-refuse), BOOT006
+(bootstrap-trust — `bl_update` is the only path to sector 0, and it
+requires a manufacturer-signed app fw), and BOOT007 (tamper-evident seal
+on the SWD path) closes this gap operationally without an RDP burn.**
+BOOT001 alone is acceptable for dev boards and SITL audit demos;
+production units require BOOT005 + BOOT006 + BOOT007.
 
-### BOOT002 — Manufacturer public key in OTP
+### ~~BOOT002 — Manufacturer public key in OTP~~ 🚫 RETIRED 2026-05-04 (ADR-013)
 
-**Where the trust anchor lives.** STM32H7 has 1024 bytes of one-time
-programmable (OTP) memory organized as 32 blocks of 32 bytes each. We
-write the full RSA-3072 public key (~422 bytes, DER SubjectPublicKeyInfo
-encoding) to OTP at factory provisioning time.
+> ~~STM32H7 has 1024 bytes of one-time programmable (OTP) memory
+> organized as 32 blocks of 32 bytes each. We write the full RSA-3072
+> public key (~422 bytes, DER SubjectPublicKeyInfo encoding) to OTP at
+> factory provisioning time. Bootloader reads pubkey from OTP at boot.~~
+>
+> 🚫 **RETIRED 2026-05-04 (ADR-013).** OTP is no longer used for the
+> public key. The forcing function is the CubeOrange+ carrier shipped
+> by Hex: it has no externally accessible BOOT0 button, so writing OTP
+> via the system DFU bootloader would require breaking the Hex factory
+> seal. Operationally infeasible in production manufacture. The full
+> rationale (alternatives reconsidered, prior-art comparison) is in
+> [Docs/ARCHITECTURE.md §12 ADR-013](Docs/ARCHITECTURE.md).
 
-**Why full key, not just hash:**
-- We have OTP capacity to spare (~600 bytes free after the key)
-- Full key in OTP means the bootloader needs **no embedded key** in its
-  flash code — the bootloader is generic logic, key is locked data
-- Stronger against bootloader-replacement attacks: an attacker who
-  flashes a malicious bootloader cannot change the OTP key, so they
-  cannot forge a working signature
+✅ **CURRENT — Manufacturer pubkey embedded in bootloader binary:**
+- The RSA-3072 manufacturer pubkey is compiled into the bootloader as
+  a constant data symbol (DER SubjectPublicKeyInfo, ~422 bytes), sourced
+  from `pki/manufacturer/public/manufacturer_public.pem` at build time.
+- The same pubkey continues to be embedded in the app fw (existing
+  `firmware/include/manufacturer_pubkey.h` flow) for UPD001 / manifest
+  verification.
+- An attacker cannot replace the bootloader-embedded pubkey without
+  rewriting sector 0, which requires either (a) DFU — refused by
+  BOOT005, (b) `bl_update` — requires a manufacturer-signed app fw
+  (BOOT006), or (c) SWD — gated by the tamper-evident seal (BOOT007).
+- `tools/provisioning/program_otp.py` is **not built** — there is no
+  OTP step in the manufacturing flow. (Tool entry preserved as
+  struck-through in the directory layout for traceability.)
 
-**Private key is NEVER on the device.** It stays in the manufacturer's
-HSM / offline secure storage. Compromise of any device yields only the
-public key, which is useless for forging signatures.
+### ~~BOOT003 — RDP Level 2 burn (production hardware lockdown)~~ 🚫 RETIRED 2026-05-04 (ADR-013)
+
+> ~~RDP Level 2 sets STM32 option bytes such that DFU writes are
+> refused, SWD/JTAG is permanently disabled, external flash readout
+> returns zeros, and option-byte modifications themselves are blocked.
+> Procedure: pre-burn checklist, OTP key programmed and verified, RDP
+> L1 rehearsal, then `tools/provisioning/burn_rdp.py --commit ...`.
+> Production-only; dev boards stay at RDP 0.~~
+>
+> 🚫 **RETIRED 2026-05-04 (ADR-013).** RDP burn is no longer part of
+> provisioning. The forcing function is identical to BOOT002 — RDP
+> burn requires BOOT0 + SWD access during factory provisioning, which
+> the Hex carrier does not expose without breaking the factory seal.
+> See [Docs/ARCHITECTURE.md §12 ADR-013](Docs/ARCHITECTURE.md) for the
+> full rationale and alternatives reconsidered.
+
+✅ **CURRENT — chip-level lockdown replaced by a three-part compensating control:**
+- **BOOT005 (software DFU-refuse)** — secure bootloader actively
+  refuses DFU mode entry, replacing the chip-level DFU disable that
+  RDP L2 would have provided.
+- **BOOT006 (bootstrap-trust)** — sector 0 is only writable via
+  `bl_update` from a running, signed app fw, replacing the chip-level
+  flash-write protection that RDP L2 would have provided.
+- **BOOT007 (tamper-evident seal + serial tracking)** — physical
+  access to SWD/JTAG (the remaining write path) requires visibly
+  breaking the airframe + Cube seal, replacing the chip-level
+  SWD-disable that RDP L2 would have provided. Detection is
+  procedural (seal inspection on RMA receipt) rather than hardware.
+- `tools/provisioning/burn_rdp.py` is **not built**. (Tool entry
+  preserved as struck-through in the directory layout for
+  traceability.)
+
+### BOOT004 — Flash encryption (deferred — not Level 1) 🛑 Out of scope for DGCA Level 1
+
+Reserved ID for AES-based flash encryption. **Not implemented**, and
+not required for Level 1 (DGCA's `Storage Security` clause asks for
+authorized-only updates of registered checksums, which our signed
+chain delivers — confidentiality is not a Level 1 requirement). May be
+added for productization or Level 2/3 parity. See ADR-004 in
+[Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md).
+
+### BOOT005 — Secure bootloader software DFU-refuse (closes Path A) ⭐ NEW 2026-05-04 (ADR-014)
+
+**What this closes.** Path A is the stock STM32 DFU bootloader (USB +
+BOOT pin). On the H743 there is no chip-level switch to disable DFU
+without RDP Level 2, which we cannot burn (BOOT003 retired). Instead,
+the **secure (signed) variant of the PX4 bootloader** contains a
+software check that **refuses to enter DFU mode**.
+
+**Mechanism (planned, ArduPilot pattern).** A build-time flag
+`#define INOFLY_SECURE_BL` guards a compile-time refusal that returns
+immediately from the DFU-entry decision point in the PX4 bootloader.
+The flag is set in the production bootloader build target and unset
+in dev builds.
+
+**Why this works as Path A closure.**
+- An attacker with USB access cannot enter DFU because the running
+  bootloader refuses the entry condition. The ROM DFU loader is
+  never invoked (the user code in sector 0 runs first, since BOOT0
+  is not asserted on the production carrier).
+- An attacker cannot replace the bootloader with one that does *not*
+  refuse DFU, because writing sector 0 requires either DFU (refused)
+  or `bl_update` from a manufacturer-signed app fw (BOOT006), or
+  SWD/JTAG which is gated by the seal (BOOT007).
 
 **Implementation:**
-- Factory provisioning script: `tools/provisioning/program_otp.py`
-- Reads `pki/manufacturer/public/manufacturer_public.pem`
-- Converts to DER SubjectPublicKeyInfo
-- Programs OTP blocks via SWD using OpenOCD or ST-Link tool
-- DRY_RUN=1 by default; explicit `--commit` flag to actually write
-- Verifies OTP contents after write (read-back)
+- Patch the PX4 bootloader (in `~/PX4-Autopilot/platforms/nuttx/...`,
+  or wherever the bootloader source lives in the fork — confirm path
+  in WSL) at the DFU-entry check.
+- Provide both build targets: `cubeorangeplus_bootloader_secure` (with
+  `INOFLY_SECURE_BL`) and `cubeorangeplus_bootloader_dev` (without).
+- Production manufacturing flashes only the secure variant.
 
-**OTP is permanent.** Each block, once written, cannot be erased. Mistakes
-waste OTP slots but do not brick the chip (32 blocks available; we use
-~14 for the key, leaving plenty of headroom for retries and per-device
-secrets later).
+**Reference:** ArduPilot's secure bootloader uses the same pattern —
+*"the flight controller will refuse a switch to DFU mode if it is
+running a secure bootloader already"* (`Tools/scripts/signing/README.md`).
 
-### BOOT003 — RDP Level 2 burn (production hardware lockdown)
+### BOOT006 — `bl_update` / ROMFS-bundled secure bootloader (install path + bootstrap-trust root) ⭐ NEW 2026-05-04 (ADR-015)
 
-**What this closes.** RDP Level 2 sets STM32 option bytes such that:
-- DFU bootloader refuses writes entirely
-- SWD/JTAG debug interface permanently disabled
-- External read of flash returns zeros
-- Boot from RAM / system memory disabled (only user flash boots)
-- Option byte modifications themselves are blocked (cannot return to L1/L0)
+**What this is.** PX4's `bl_update` mechanism — a MAVLink command
+(`flashbootloader`) that tells the running app fw to read a bootloader
+image out of its own ROMFS and write it to sector 0. We bundle our
+**secure bootloader binary** (the BOOT005-enabled build) as a ROMFS
+asset inside every signed app fw release.
 
-This is the hardware control that makes Path A truly impossible. Without
-it, BOOT001 is necessary but not sufficient.
+**Why this is the install path AND the trust root.**
 
-**Irreversibility — this is the most dangerous step in the project.**
-Once RDP Level 2 is burned: no debugger can ever attach, no DFU recovery
-possible, the chip behaves as user-flash-only forever. A mistake (wrong
-firmware, wrong key in OTP, broken bootloader) bricks the unit
-permanently. Scrap-rate must be assumed > 0.
+This is both the *only* way to install/update the secure bootloader
+(no factory BOOT0 access) and the *only* unprivileged path that can
+ever write sector 0:
 
-**Procedure (runbook-driven, manual execution only):**
-- See `Docs/RDP_BURN_RUNBOOK.md` (Phase 5 deliverable)
-- Pre-burn checklist: bootloader flashed and verified, OTP key programmed
-  and verified, signed firmware boots cleanly, DFU rejection rehearsed at
-  RDP Level 1 first
-- Burn step is `tools/provisioning/burn_rdp.py --commit --confirm-yes-i-understand-this-is-permanent`
-- Post-burn verification: signed firmware still boots, unsigned firmware
-  rejected, DFU returns errors, SWD does not enumerate
+- **Only install path:** factory-flashing the bootloader requires
+  BOOT0 + SWD access, which the Hex carrier does not expose. So the
+  first install of the secure bootloader has to come from inside a
+  running app fw — `bl_update` is exactly that mechanism.
+- **Bootstrap-trust root:** because `bl_update` runs *inside* the app
+  fw, and the app fw is signature-verified by the bootloader on every
+  boot (BOOT001), only a manufacturer-signed app fw can ever push a
+  new bootloader. An attacker without the manufacturer's RSA-3072
+  private key cannot get a malicious bootloader past sector 0,
+  regardless of physical access (DFU is refused; SWD requires
+  breaking the seal).
 
-**Production-only.** Dev boards stay at RDP Level 0 to keep iteration cheap.
-RDP Level 1 (reversible — regression to L0 erases flash but recovers the
-board) is used as a rehearsal step before committing to L2.
+**Install / update flow** (full procedure: see
+`Docs/MANUFACTURING_RUNBOOK.md`):
+
+1. Receive CubeOrange+ from Hex with stock factory bootloader.
+2. **Verify factory bootloader hash** against a known-good reference
+   (mitigates the "factory bootloader trusts anything" supply-chain
+   trust window — checked at our facility, before first install).
+3. Flash our **first signed app fw** via QGC firmware-load (the stock
+   bootloader will accept it because it is the unsigned-trust window).
+4. Trigger MAVLink `flashbootloader`. App fw extracts the secure
+   bootloader from its ROMFS and writes it to sector 0.
+5. Reboot. Secure bootloader is now active; it verifies the running
+   app fw on next boot.
+6. Verify by attempting an unsigned-fw load — confirm rejection.
+7. Apply tamper-evident seal (BOOT007), record UID + seal serial, ship.
+
+**Implementation:**
+- `bl_update` must remain **enabled** in `cubeorangeplus_default.px4board`
+  (the 2026-05-03 disable patch is reversed in Step 7 of the
+  amendment plan; see project memory).
+- Build pipeline: every signed app fw release embeds the matching
+  signed secure-bootloader binary as a ROMFS resource. Signer signs
+  app fw including ROMFS contents.
+- App fw size budget gains the ROMFS-embedded bootloader (~44 KB
+  baseline, ~100 KB+ with libtomcrypt RSA-PSS verification). If app
+  fw overflows, manage size by stripping unused PX4 modules
+  (`fw_*`, `vtol_*`, `rover_*`, `airship_*`, etc. — see project memory
+  for the categorized strip list), **not** by disabling `bl_update`.
+
+**Reference:** PX4 `bl_update` is the platform's intended mechanism;
+ArduPilot uses the same pattern (`flashbootloader` via Mission Planner
+/ QGC / MAVProxy). Hundreds of thousands of fielded ArduPilot units
+deploy this way.
+
+### BOOT007 — Tamper-evident sealing + serial tracking (compensating control) ⭐ NEW 2026-05-04 (ADR-013)
+
+**What this is.** The physical-attacker class (someone who
+disassembles the airframe and the Cube enclosure to reach SWD/JTAG)
+is **out of scope at the cryptographic layer** under the amended
+architecture. The compensating control is procedural:
+
+- **Serialized tamper-evident seals** on the airframe joint and on
+  the Cube enclosure, applied at our manufacturing facility before
+  shipping. Holographic / void-pattern seals; specific vendor TBD
+  (see MANUFACTURING_RUNBOOK.md).
+- **STM32 96-bit UID + seal serial** recorded in QMS at manufacture.
+  The pair forms a per-unit fingerprint that lets us correlate a
+  returning unit back to its as-shipped state.
+- **RMA inspection workflow.** Any unit returning with a broken seal
+  is quarantined and **not re-flown without re-provisioning** (full
+  factory reset → secure bootloader re-install → reseal → re-record
+  UID + new seal serial).
+
+**Why this is acceptable for DGCA Level 1.** Level 1 is concerned with
+*authorized-only updates* of firmware and registered checksums — i.e.,
+authenticity / integrity, not confidentiality. Our cryptographic chain
+(BOOT001 + UPD001 + BOOT005 + BOOT006) blocks every software path. The
+remaining attack surface is a physical attacker with disassembly
+capability; for that class, "the seal will visibly show this happened"
+is what auditors expect at Level 1, the same standard applied to
+physical anti-tamper on production avionics.
+
+**Implementation:**
+- Seal procurement (vendor + part number) — TBD; documented in
+  `Docs/MANUFACTURING_RUNBOOK.md`.
+- QMS / serial-tracking entry per unit:
+  `(STM32 96-bit UID, seal serial, manufacture date, signed app fw version)`.
+- RMA workflow doc — covered in MANUFACTURING_RUNBOOK.md (or a separate
+  RMA SOP if scope grows).
 
 ---
 
@@ -374,9 +574,15 @@ board) is used as a rehearsal step before committing to L2.
 
 ### Phase 5 — Hardware Deployment (CubeOrange+) 🔧 In Progress
 
-**Hardware constraint:** 1× CubeOrange+ on hand. Recommend procuring a 2nd
-unit before BOOT003 — RDP burn is irreversible, and a single board means
-the dev unit IS the demo unit. Single-board path is workable but tight.
+**Hardware constraint:** 1× CubeOrange+ on hand. ~~Recommend procuring a
+2nd unit before BOOT003 — RDP burn is irreversible, and a single board
+means the dev unit IS the demo unit. Single-board path is workable but
+tight.~~ ⚠️ **AMENDED 2026-05-04 (ADR-013):** with BOOT003 retired,
+there is no irreversible step in production manufacture. A single
+CubeOrange+ is acceptable for both dev and demo use; the unit can be
+re-provisioned (factory reset → secure bootloader re-install → reseal)
+without scrap. A second unit is still nice-to-have for parallel work
+but is no longer a de-risking requirement.
 
 | Sub-phase | Req ID | Description | Status |
 |-----------|--------|-------------|--------|
@@ -387,27 +593,64 @@ the dev unit IS the demo unit. Single-board path is workable but tight.
 | 5.5 | — | CMakeLists.txt: mbedTLS include path + board_id compile define from prototype | ✅ Done |
 | 5.6 | — | Pipeline: --board-id, --code-bin, --data-bin for hardware section hashing | ✅ Done |
 | 5.7 | — | ARM toolchain installation in WSL2 | ⏳ User action |
-| 5.8 | — | First hardware build + flash + test (RDP Level 0, dev mode) | ⏳ Pending toolchain |
+| 5.8 | — | First hardware build + flash + test (dev bootloader, no DFU-refuse, no seal) | ⏳ Pending toolchain |
 | 5.9 | LOG001 | ~~Per-file log signing~~ ✅ Done (SITL) — moved to Phase 3.3 | ✅ Done |
 
 **Phase 5b — Bootloader gap closure (closes Path A / DFU bypass)**
 
+⚠️ **AMENDED 2026-05-04 (ADR-013/014/015).** The original Phase 5b
+plan (rows 5b.3, 5b.6, 5b.9–5b.14) revolved around OTP programming
+and an irreversible RDP Level 2 burn. Both are retired (BOOT002/003).
+The replacement plan is shorter — no irreversible chip step, no extra
+hardware procurement to de-risk the burn — and rooted in already-supported
+PX4 platform mechanisms (`bl_update`).
+
+~~Original plan (struck for traceability):~~
+
+| ~~Sub-phase~~ | ~~Req ID~~ | ~~Description~~ | ~~Status~~ |
+|---|---|---|---|
+| ~~5b.1~~ | ~~BOOT001~~ | ~~Locate PX4 bootloader source in WSL; identify flash-write entry points~~ | ~~⏳ Planned~~ |
+| ~~5b.2~~ | ~~BOOT001~~ | ~~Add mbedTLS sig-verify primitives to bootloader build~~ | ~~⏳ Planned~~ |
+| ~~5b.3~~ | ~~BOOT002~~ | ~~OTP-read driver in bootloader (HAL-level access to STM32H7 OTP region)~~ | ~~⏳ Planned~~ |
+| ~~5b.4~~ | ~~BOOT001~~ | ~~Hook sig-verification into bootloader boot path (POST in bootloader)~~ | ~~⏳ Planned~~ |
+| ~~5b.5~~ | ~~BOOT001~~ | ~~Hook sig-verification into bootloader flash-write path~~ | ~~⏳ Planned~~ |
+| ~~5b.6~~ | ~~BOOT002~~ | ~~`tools/provisioning/program_otp.py` — DRY_RUN by default, SWD/OpenOCD backend~~ | ~~⏳ Planned~~ |
+| ~~5b.7~~ | ~~BOOT001~~ | ~~Validate on dev board (RDP 0): signed firmware boots, unsigned rejected~~ | ~~⏳ Planned~~ |
+| ~~5b.8~~ | ~~BOOT001~~ | ~~Validate via DFU attempt (RDP 0): unsigned rejected on next boot~~ | ~~⏳ Planned~~ |
+| ~~5b.9~~ | ~~—~~ | ~~Procure 2nd CubeOrange+ if budget permits (de-risks BOOT003 burn)~~ | ~~⏳ User action~~ |
+| ~~5b.10~~ | ~~BOOT003~~ | ~~`tools/provisioning/burn_rdp.py` — multi-stage gate, L1 rehearsal first~~ | ~~⏳ Planned~~ |
+| ~~5b.11~~ | ~~BOOT003~~ | ~~`Docs/RDP_BURN_RUNBOOK.md` — pre-burn checklist, burn steps, post-burn verify~~ | ~~⏳ Planned~~ |
+| ~~5b.12~~ | ~~BOOT003~~ | ~~Rehearse full burn at RDP Level 1 (reversible, recovery-safe)~~ | ~~⏳ Planned~~ |
+| ~~5b.13~~ | ~~BOOT003~~ | ~~Production burn at RDP Level 2 on demo unit (irreversible)~~ | ~~⏳ Pre-audit only~~ |
+| ~~5b.14~~ | ~~ALL~~ | ~~Auditor demo dry-run on burned unit (DFU fails, SWD blocked, signed boots)~~ | ~~⏳ Pre-audit only~~ |
+
+✅ **CURRENT — Phase 5b under amended architecture (ADR-013/014/015):**
+
 | Sub-phase | Req ID | Description | Status |
 |-----------|--------|-------------|--------|
-| 5b.1 | BOOT001 | Locate PX4 bootloader source in WSL; identify flash-write entry points | ⏳ Planned |
-| 5b.2 | BOOT001 | Add mbedTLS sig-verify primitives to bootloader build | ⏳ Planned |
-| 5b.3 | BOOT002 | OTP-read driver in bootloader (HAL-level access to STM32H7 OTP region) | ⏳ Planned |
-| 5b.4 | BOOT001 | Hook sig-verification into bootloader boot path (POST in bootloader) | ⏳ Planned |
-| 5b.5 | BOOT001 | Hook sig-verification into bootloader flash-write path | ⏳ Planned |
-| 5b.6 | BOOT002 | `tools/provisioning/program_otp.py` — DRY_RUN by default, SWD/OpenOCD backend | ⏳ Planned |
-| 5b.7 | BOOT001 | Validate on dev board (RDP 0): signed firmware boots, unsigned rejected | ⏳ Planned |
-| 5b.8 | BOOT001 | Validate via DFU attempt (RDP 0): unsigned rejected on next boot | ⏳ Planned |
-| 5b.9 | — | Procure 2nd CubeOrange+ if budget permits (de-risks BOOT003 burn) | ⏳ User action |
-| 5b.10 | BOOT003 | `tools/provisioning/burn_rdp.py` — multi-stage gate, L1 rehearsal first | ⏳ Planned |
-| 5b.11 | BOOT003 | `Docs/RDP_BURN_RUNBOOK.md` — pre-burn checklist, burn steps, post-burn verify | ⏳ Planned |
-| 5b.12 | BOOT003 | Rehearse full burn at RDP Level 1 (reversible, recovery-safe) | ⏳ Planned |
-| 5b.13 | BOOT003 | Production burn at RDP Level 2 on demo unit (irreversible) | ⏳ Pre-audit only |
-| 5b.14 | ALL | Auditor demo dry-run on burned unit (DFU fails, SWD blocked, signed boots) | ⏳ Pre-audit only |
+| 5b.1 | BOOT001 | Locate PX4 bootloader source in WSL; identify firmware-launch decision point | ✅ Done (sector 0 / 128 KB, baseline 43.8 KB — see project memory) |
+| 5b.2a | BOOT001 | Path C: extend PX4 crypto enum with `CRYPTO_RSA_PSS` using already-linked libtomcrypt — no new dependency | ✅ Done (Phase 5b.2c — bootloader links at 103.6 KB / 128 KB, 21% headroom) |
+| 5b.2b | BOOT001 | Embed manufacturer pubkey as DER constant in bootloader binary (sourced from `pki/manufacturer/public/manufacturer_public.pem` at build time) | ✅ Done (Path C / Phase 5b.2 — see `bootloader_keystore.h` in PX4 fork) |
+| 5b.3 | BOOT001 | Hook sig-verification into bootloader boot path (verify app fw before launch) | ⏳ Planned |
+| 5b.4 | BOOT001 | TOC-aware off-board signer (`tools/signer/toc_sign.py`) + compliance tests for round-trip sign/verify | ⏳ In-progress (working tree, untracked) |
+| 5b.5 | BOOT005 | Software DFU-refuse — `INOFLY_SECURE_BL` build-flag-guarded refusal at the DFU-entry decision point | ⏳ Planned |
+| 5b.6 | BOOT006 | Re-enable `bl_update` in `cubeorangeplus_default.px4board` (reverses 2026-05-03 disable) | ⏳ Planned (Step 7 of 2026-05-04 plan) |
+| 5b.7 | BOOT006 | Bundle secure bootloader as ROMFS asset in signed app fw; signer covers ROMFS bytes | ⏳ Planned |
+| 5b.8 | BOOT006 | Verify app fw fits in flash with ROMFS-embedded bootloader; if overflow, strip unused PX4 modules (categorized list in project memory) — **NOT** by disabling `bl_update` | ⏳ Planned (Step 7/8) |
+| 5b.9 | BOOT001 | Validate on dev board (no seal): signed app fw boots; unsigned app fw rejected; bootloader reports the failure | ⏳ Planned |
+| 5b.10 | BOOT005 | Validate DFU-refuse on dev board with `INOFLY_SECURE_BL` set: USB DFU enumeration / `dfu-util` flash attempt fails | ⏳ Planned |
+| 5b.11 | BOOT006 | Validate `bl_update` round-trip: load app fw v1 → trigger `flashbootloader` → reboot → confirm new bootloader hash; unsigned app fw cannot trigger `bl_update` (rejected by BOOT001) | ⏳ Planned |
+| 5b.12 | BOOT007 | Procure tamper-evident seals (vendor + PN) and document the procedure in `Docs/MANUFACTURING_RUNBOOK.md` | ⏳ Planned (deliverable: MANUFACTURING_RUNBOOK.md) |
+| 5b.13 | BOOT007 | First-unit production manufacturing dry-run on demo unit: full sequence from receive → seal → ship in QMS, including UID + seal-serial recording | ⏳ Pre-audit only |
+| 5b.14 | ALL | Auditor demo dry-run on a sealed unit (DFU rejected, signed app fw boots, signature enforcement verified, seal inspection demonstrated) | ⏳ Pre-audit only |
+
+**Why this plan is shorter than the original.** No OTP programming
+step, no irreversible RDP burn, no L1 rehearsal, no second-board
+procurement to de-risk a permanent step. The trade is more
+operational / procedural rigor (seal management + RMA workflow)
+instead of a one-shot hardware step. See
+[Docs/ARCHITECTURE.md §12 ADR-013](Docs/ARCHITECTURE.md) for the
+full rationale and prior-art comparison (ArduPilot pattern).
 
 ### Phase 6 — Compliance Test Suite ✅ Complete
 | Sub-phase | Req ID | Description | Status |
@@ -431,9 +674,9 @@ the dev unit IS the demo unit. Single-board path is workable but tight.
 | ~~No audit logging on drone~~ | LOG001 | ~~High~~ | ✅ Resolved (SITL) |
 | ~~Drone doesn't reject unsigned firmware~~ | UPD001 | ~~High~~ | ✅ Resolved |
 | ~~GCS-FC pairing not implemented~~ | PAIR001 | ~~Medium~~ | ✅ Resolved (SITL) |
-| Path A: DFU bypasses signature check | BOOT001 | High | Yes (production cert) — planned Phase 5b |
-| No hardware-locked root of trust | BOOT002 | High | Yes (production cert) — planned Phase 5b |
-| DFU/SWD interfaces still open | BOOT003 | High | Yes (production cert) — planned pre-audit |
+| Path A: DFU bypasses signature check | BOOT001 + BOOT005 | High | Yes (production cert) — planned Phase 5b |
+| ~~No hardware-locked root of trust~~ ⚠️ amended 2026-05-04 — bootstrap-trust replaces OTP | ~~BOOT002~~ → BOOT006 | High | Yes (production cert) — planned Phase 5b |
+| ~~DFU/SWD interfaces still open~~ ⚠️ amended 2026-05-04 — software DFU-refuse + seal replace RDP burn | ~~BOOT003~~ → BOOT005 + BOOT007 | High | Yes (production cert) — planned Phase 5b |
 
 ---
 
@@ -461,11 +704,12 @@ tools/
   pipeline.py       Full release pipeline (checksum → sign → bundle → export)
   pki/              keygen.py, embed_pubkey.py
   checksum/         checksum.py
-  signer/           signer.py
+  signer/           signer.py             SIG001 — manifest signing (RSA-PSS, base64 JSON bundle)
+                    toc_sign.py           BOOT001 — TOC-aware off-board signer for the verifying bootloader (RSA-PSS saltlen=32, matches libtomcrypt)
   bundler/          bundler.py
   provisioning/     export_manifest.py, provision_sitl.py, provision_signing_key.py
-                    program_otp.py        BOOT002 — write pubkey to STM32 OTP (DRY_RUN default)
-                    burn_rdp.py           BOOT003 — RDP option-byte burn (multi-stage, irreversible)
+                    # ~~program_otp.py        BOOT002 — write pubkey to STM32 OTP (DRY_RUN default)~~ 🚫 RETIRED 2026-05-04 (ADR-013) — OTP not used
+                    # ~~burn_rdp.py           BOOT003 — RDP option-byte burn (multi-stage, irreversible)~~ 🚫 RETIRED 2026-05-04 (ADR-013) — no RDP burn
   generate_security_doc.py
   generate_compliance_report.py   Compliance report generator (Phase 6.5)
 
@@ -491,13 +735,17 @@ tests/
     test_PAIR001_gcs_pairing.py
     test_POST001_power_on_self_test.py
     test_UPD001_secure_update.py
+    test_BOOT001_toc_sign_verify.py    BOOT001 — TOC-aware signer round-trip + tamper tests
   integration/      Integration tests (requires WSL2 + SITL)
     test_sitl_e2e.py
 
 Docs/
+  ARCHITECTURE.md                  Canonical architecture reference (LOCKED 2026-04-29; partially amended 2026-05-04)
   Drone_Security_Overview.docx
   THREAT_MODEL.md
-  RDP_BURN_RUNBOOK.md             BOOT003 — pre-burn checklist, burn steps, post-burn verify
+  SITL_ACCEPTANCE.md               SITL gate before flashing real hardware
+  MANUFACTURING_RUNBOOK.md         BOOT006/007 — receive → first install → bl_update → seal → ship (deliverable)
+  # ~~RDP_BURN_RUNBOOK.md             BOOT003 — pre-burn checklist, burn steps, post-burn verify~~ 🚫 RETIRED 2026-05-04 (ADR-013) — no RDP burn
   compliance_report.json          Machine-readable compliance matrix
   compliance_report.txt           Human-readable report for auditor
 

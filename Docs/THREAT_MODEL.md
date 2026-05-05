@@ -1,11 +1,46 @@
 # Threat Model — Inofly UAS Firmware Security
 
-**Document version:** 1.1
-**Date:** 2026-04-29
+**Document version:** 1.2
+**Date:** 2026-05-04 (amended)
 **Scope:** DGCA Level 1 Type Certification — Firmware Manufacturer
 **Framework:** Adapted from STRIDE for embedded UAS systems
 
-**Changes since 1.0:**
+> **🟡 PARTIALLY AMENDED — 2026-05-04 (architecture pivot).** Threats
+> T10–T13 originally cited BOOT002 (OTP pubkey) and BOOT003 (RDP Level
+> 2 burn) as their primary mitigations. Those requirements are
+> **retired** — the CubeOrange+ carriers we ship have no externally
+> accessible BOOT0 button, making OTP write and RDP burn operationally
+> infeasible. They are replaced by an ArduPilot-style bootstrap-trust
+> chain plus tamper-evident sealing. See
+> [ARCHITECTURE.md §12 ADR-013/014/015](ARCHITECTURE.md) and
+> [SECURITY_PLAN.md](../SECURITY_PLAN.md) for the architectural and
+> requirement-level detail.
+>
+> Section 6 ("Assumptions and Boundaries") has been amended to make
+> the **physical-attacker scope boundary** explicit. T10–T13 mitigation
+> rows have been amended in place using the project-wide
+> strikethrough+current convention. Section 7 attack-tree narrative
+> uses the same convention.
+
+**Changes since 1.1 (2026-05-04):**
+- Section 6 boundaries: explicit physical-attacker-out-of-scope
+  statement, with the compensating procedural controls listed
+- T10 (DFU bypass): mitigation amended — software DFU-refuse (BOOT005)
+  replaces RDP-L2 chip-level disable
+- T11 (Custom bootloader replacement): mitigation amended — bootstrap-
+  trust (BOOT006) + tamper-evident seal (BOOT007) replace RDP-L2 SWD
+  disable
+- T12 (OTP key tampering): retired (no OTP), replaced by T12'
+  (bootloader-embedded pubkey tampering) with same fail-closed property
+  via bootstrap-trust
+- T13 (Debugger verify skip): mitigation amended — tamper-evident
+  seal (BOOT007) replaces RDP-L2 SWD disable
+- Section 7 attack-tree narrative: chain-of-trust diagram replaced
+  with the bootstrap-trust + sealing variant; Section 7.5
+  "Why flash encryption is not required" updated (seal replaces RDP
+  in the readout-protection argument)
+
+**Changes since 1.0 (2026-04-29):**
 - Added threats T10–T13 covering bootloader, OTP, and physical-debug
   attack surfaces (the Phase 5b gap)
 - New Section 7: "Attack Tree — Secure Boot Bypass Analysis" walks
@@ -146,31 +181,43 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 
 | Field | Value |
 |-------|-------|
-| **Attack** | Attacker holds the BOOT button while plugging in USB. STM32H7 enters its built-in DFU bootloader, which flashes any image presented over `dfu-util` without checking signatures. UPD001 protects only the MAVLink-FTP path (Path B) — DFU runs from ROM and never invokes our firmware. |
+| **Attack** | Attacker holds the BOOT button while plugging in USB. STM32H7 enters its built-in DFU bootloader, which flashes any image presented over `dfu-util` without checking signatures. UPD001 protects only the MAVLink-FTP path (Path B) — DFU runs from ROM and never invokes our firmware. ⚠️ **AMENDED 2026-05-04 (ADR-013):** on the CubeOrange+ carriers we ship, the BOOT pin is not externally accessible without breaking the Hex factory seal — so the *opportunistic* USB-only attacker cannot even assert BOOT0. The "USB + BOOT button" attack therefore requires the seal-breaking step, which moves it into the physical-attacker class (out of scope at the cryptographic layer; see Section 6). |
 | **Impact** | Arbitrary firmware on flight controller; full compromise. |
-| **Likelihood** | High with physical USB access; trivial tooling (`dfu-util` is open source). |
-| **Mitigations** | BOOT001 (custom bootloader re-verifies firmware signature on every boot — DFU-flashed unsigned firmware will not launch on next reboot), BOOT003 (RDP Level 2 disables the DFU bootloader at the chip level — USB DFU enumerator simply does not respond). |
-| **Residual risk** | Currently HIGH (Phase 5b not shipped). After BOOT001: LOW (firmware refuses to launch). After BOOT003: NONE (DFU dead at chip level). |
+| **Likelihood** | ~~High with physical USB access; trivial tooling (`dfu-util` is open source).~~ ⚠️ **AMENDED 2026-05-04:** ✅ **Low** for the USB-only attacker class — BOOT0 is not exposed on our shipped carrier. **High** for a physical attacker who breaks the seal (out of scope at the crypto layer; compensated procedurally by the seal + RMA workflow). |
+| **Mitigations** | BOOT001 (verifying bootloader re-checks firmware signature on every boot — DFU-flashed unsigned firmware will not launch on next reboot). ~~BOOT003 (RDP Level 2 disables the DFU bootloader at the chip level — USB DFU enumerator simply does not respond).~~ ⚠️ **AMENDED 2026-05-04 (ADR-014):** ✅ **BOOT005 (software DFU-refuse).** The secure variant of the PX4 bootloader contains a compile-time check (`#define INOFLY_SECURE_BL`) that refuses DFU mode entry — same end property as RDP L2 (DFU is unreachable from a running production unit) via a software mechanism that does not require BOOT0/SWD access at provisioning time. ArduPilot uses this exact pattern in production. |
+| **Residual risk** | ~~Currently HIGH (Phase 5b not shipped). After BOOT001: LOW (firmware refuses to launch). After BOOT003: NONE (DFU dead at chip level).~~ ⚠️ **AMENDED 2026-05-04:** ✅ **Currently HIGH** (Phase 5b not shipped). **After BOOT001:** LOW (firmware refuses to launch). **After BOOT005:** LOW for USB-only attackers (DFU mode entry refused before the ROM loader is reached); the seal-breaking physical attacker is handled procedurally (T10 likelihood row + Section 6). |
 
 ### T11 — Custom bootloader replacement
 
 | Field | Value |
 |-------|-------|
-| **Attack** | Attacker uses DFU or SWD to overwrite our bootloader with one that returns "signature OK" without actually verifying. The replaced bootloader then launches arbitrary firmware. |
+| **Attack** | Attacker uses DFU or SWD to overwrite our bootloader with one that returns "signature OK" without actually verifying. The replaced bootloader then launches arbitrary firmware. ⚠️ **AMENDED 2026-05-04 (ADR-013/015):** under the bootstrap-trust model, sector 0 is also writable via PX4's `bl_update` mechanism — but `bl_update` runs *inside* a running app fw, and the running app fw is signature-verified by the existing bootloader (BOOT001). So `bl_update` is only weaponizable by an attacker who already holds the manufacturer's RSA-3072 private key (covered by T3). |
 | **Impact** | Bypasses the entire chain of trust — every downstream check (firmware sig, manifest sig, POST, ARM gate) is performed by attacker-controlled code. |
-| **Likelihood** | High pre-RDP (DFU and SWD both writable); requires physical port access. |
-| **Mitigations** | BOOT003 (RDP Level 2 disables DFU writes AND SWD/JTAG writes at the chip level — no remaining external write path to the bootloader region). The bootloader's trust anchor (manufacturer pubkey) lives in OTP, not in the bootloader binary, so even a copied bootloader cannot substitute its own key. |
-| **Residual risk** | HIGH on dev boards (RDP 0 — accepted, dev-only). NONE on production units after RDP L2 is burned. This is the single strongest argument for why production hardware MUST go through Phase 5b's RDP burn. |
+| **Likelihood** | ~~High pre-RDP (DFU and SWD both writable); requires physical port access.~~ ⚠️ **AMENDED 2026-05-04:** ✅ **Low** for the USB-only attacker class — DFU is software-refused (BOOT005); `bl_update` requires a manufacturer-signed app fw (BOOT006). **High** for a physical attacker who reaches SWD/JTAG by breaking the airframe + Cube seal (out of scope at the crypto layer; compensated procedurally — see Section 6 and T11 mitigation row). |
+| **Mitigations** | ~~BOOT003 (RDP Level 2 disables DFU writes AND SWD/JTAG writes at the chip level — no remaining external write path to the bootloader region). The bootloader's trust anchor (manufacturer pubkey) lives in OTP, not in the bootloader binary, so even a copied bootloader cannot substitute its own key.~~ ⚠️ **AMENDED 2026-05-04 (ADR-013/014/015):** ✅ **Three-part compensating control replaces RDP L2:** (a) **BOOT005 software DFU-refuse** — production bootloader actively refuses DFU mode entry, closing the DFU path. (b) **BOOT006 bootstrap-trust** — sector 0 writes via `bl_update` require a manufacturer-signed app fw containing the new bootloader in ROMFS; an attacker without the manufacturer's private key cannot push a malicious bootloader. (c) **BOOT007 tamper-evident seal** — physical SWD/JTAG access requires visibly breaking the airframe + Cube seal, triggering RMA quarantine on receipt. The bootloader's trust anchor (manufacturer pubkey) is now embedded in the bootloader binary itself; an attacker who could rewrite sector 0 could substitute a key — but every remaining write path is closed by (a)–(c) above. |
+| **Residual risk** | ~~HIGH on dev boards (RDP 0 — accepted, dev-only). NONE on production units after RDP L2 is burned. This is the single strongest argument for why production hardware MUST go through Phase 5b's RDP burn.~~ ⚠️ **AMENDED 2026-05-04:** ✅ **HIGH on dev boards** (no DFU-refuse, no seal — accepted, dev-only segregation as before). **LOW on sealed production units** at the cryptographic layer (DFU dead, `bl_update` requires signed fw, SWD requires breaking seal). The residual *physical-attacker* risk on sealed production units is acknowledged and compensated procedurally (RMA inspection + UID/seal-serial tracking — see Section 6). The single strongest argument for why production manufacturing **must** go through MANUFACTURING_RUNBOOK.md (seal application + UID recording). |
 
-### T12 — OTP public-key tampering
+### ~~T12 — OTP public-key tampering~~ 🚫 RETIRED 2026-05-04 (ADR-013) — replaced by T12'
+
+> ~~Attacker attempts to overwrite the manufacturer public key in OTP
+> with their own pubkey, then signs malicious firmware with the
+> matching private key. Mitigation: OTP is one-time-programmable
+> (write-once silicon fuses); bits cannot be cleared. Attacker can
+> only corrupt our key (fails closed). Residual: NONE.~~
+>
+> 🚫 **RETIRED 2026-05-04 (ADR-013).** OTP is no longer used for the
+> trust anchor. The equivalent threat under the amended architecture
+> is T12' below.
+
+### T12' — Bootloader-embedded public-key tampering ⭐ NEW 2026-05-04 (replaces T12)
 
 | Field | Value |
 |-------|-------|
-| **Attack** | Attacker attempts to overwrite the manufacturer public key in OTP with their own pubkey, then signs malicious firmware with the matching private key. |
-| **Impact** | Would defeat the entire root of trust — bootloader would happily verify attacker-signed firmware. |
-| **Likelihood** | Physically impossible once our pubkey is programmed. |
-| **Mitigations** | OTP is one-time-programmable at the silicon level: bits flip 0→1 once, never 1→0. After we write our pubkey, an attacker can only flip additional bits to 1, which corrupts our key bytes (signature verify fails — fails closed, drone won't boot, but attacker gains nothing). |
-| **Residual risk** | NONE — hardware-enforced. Compromise would require chip decap and physical rewriting of OTP fuses, which is outside DGCA Level 1 threat scope and well into nation-state-actor territory. |
+| **Attack** | Attacker attempts to substitute the manufacturer pubkey embedded in the bootloader binary with their own pubkey, then signs malicious firmware with the matching private key. The substitution requires writing sector 0 (where the bootloader lives). |
+| **Impact** | Would defeat the entire root of trust — modified bootloader would happily verify attacker-signed firmware. |
+| **Likelihood** | **Low** for the USB-only attacker class — every external write path to sector 0 is closed: DFU is software-refused (BOOT005), `bl_update` requires a manufacturer-signed app fw (BOOT006). **High** for a physical attacker who breaks the seal to reach SWD/JTAG (out of scope at the crypto layer — see Section 6). |
+| **Mitigations** | **BOOT005 (software DFU-refuse)** + **BOOT006 (bootstrap-trust via `bl_update`)** + **BOOT007 (tamper-evident seal on SWD path)**. Same compensating-control bundle as T11. The `bl_update` path is the only unprivileged route to sector 0, and it is gated by signature verification of the running app fw containing the new bootloader image — an attacker would need the manufacturer's RSA-3072 private key to weaponize it (collapsed into T3). |
+| **Residual risk** | LOW on sealed production units at the crypto layer. Acknowledged residuals: (a) physical attacker breaking the seal — handled procedurally via RMA inspection + UID/seal-serial tracking (Section 6); (b) chip decap + physical rewriting of internal flash — outside DGCA Level 1 scope, nation-state-actor territory. ⚠️ **Note on hardware-enforced strength:** the original T12 had a hardware-enforced "fails closed" property (write-once OTP fuses). T12' does not — internal flash *can* be erased and rewritten if an attacker reaches sector 0. The end property "the bootloader on a deployed unit is the bootloader the manufacturer intended" is preserved by the seal + bootstrap-trust combination; the crypto-layer guarantee is replaced by an operational guarantee, which is the standard pattern at this hardware tier (and is what ArduPilot ships with). |
 
 ### T13 — Debugger-based runtime verification skip
 
@@ -178,9 +225,9 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 |-------|-------|
 | **Attack** | Attacker attaches an SWD/JTAG debugger, halts the CPU at the signature-verify call inside the bootloader, forces the comparison result to "pass," resumes execution. Bootloader then launches malicious firmware. |
 | **Impact** | One-off bypass per boot; persists only for that session unless attacker also writes flash. |
-| **Likelihood** | Requires physical access + debug probe (~$20 hardware) on dev boards. Impossible after RDP L2. |
-| **Mitigations** | BOOT003 (RDP Level 2 permanently disables SWD/JTAG — debug probe cannot enumerate the target). On dev boards (RDP 0), this remains an accepted risk. |
-| **Residual risk** | HIGH on dev boards — accepted because dev units are not flown in regulated airspace. NONE on production units after RDP L2. |
+| **Likelihood** | ~~Requires physical access + debug probe (~$20 hardware) on dev boards. Impossible after RDP L2.~~ ⚠️ **AMENDED 2026-05-04:** Requires physical access + debug probe (~$20 hardware) **AND** breaking the airframe + Cube tamper-evident seal to reach the SWD/JTAG pads. Out of scope at the cryptographic layer; the seal-breaking step is handled procedurally via RMA inspection (Section 6). |
+| **Mitigations** | ~~BOOT003 (RDP Level 2 permanently disables SWD/JTAG — debug probe cannot enumerate the target). On dev boards (RDP 0), this remains an accepted risk.~~ ⚠️ **AMENDED 2026-05-04 (ADR-013):** ✅ **BOOT007 (tamper-evident seal + UID/seal-serial tracking).** Reaching SWD/JTAG requires visibly breaking the seal on the airframe AND on the Cube enclosure. Detection is procedural — units returning with broken seals are quarantined on RMA receipt and not re-flown without re-provisioning. The compensating control replaces RDP L2's hardware-level SWD-disable with an operational seal-and-track workflow. On dev boards (no seal applied), this remains an accepted risk for dev-only segregation. |
+| **Residual risk** | ~~HIGH on dev boards — accepted because dev units are not flown in regulated airspace. NONE on production units after RDP L2.~~ ⚠️ **AMENDED 2026-05-04:** ✅ **HIGH on dev boards** (no seal — accepted, dev-only segregation as before). **LOW at the cryptographic layer on sealed production units** (the SWD path requires the seal-breaking step). The remaining physical-attacker residual on sealed units is acknowledged and compensated procedurally (Section 6); a successful T13 attack would leave physically visible evidence (broken seal) that triggers RMA quarantine. |
 
 ---
 
@@ -197,10 +244,11 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | T7 — Telemetry spoofing | **Low** | Low |
 | T8 — Flash corruption | **Low** | Low |
 | T9 — Board ID mismatch | **Medium** | Low |
-| T10 — DFU (Path A) bypass | **High** (Phase 5b open) | Low (BOOT001) → None (BOOT003) |
-| T11 — Bootloader replacement | **High** (RDP 0) | None (RDP L2) |
-| T12 — OTP key tampering | **None** | None (hardware-enforced) |
-| T13 — Debugger verify skip | **High** (RDP 0) | None (RDP L2) |
+| T10 — DFU (Path A) bypass | **High** (Phase 5b open) | ~~Low (BOOT001) → None (BOOT003)~~ ✅ Low (BOOT001 + BOOT005 software DFU-refuse) |
+| T11 — Bootloader replacement | **High** (no seal, no DFU-refuse) | ~~None (RDP L2)~~ ✅ Low at crypto layer on sealed production units (BOOT005 + BOOT006 + BOOT007); physical-attacker residual handled procedurally |
+| ~~T12 — OTP key tampering~~ | ~~**None**~~ | ~~None (hardware-enforced)~~ 🚫 Retired — see T12' |
+| T12' — Bootloader-embedded pubkey tampering ⭐ | **High** (Phase 5b open) | Low at crypto layer on sealed production units (same controls as T11); physical-attacker residual handled procedurally |
+| T13 — Debugger verify skip | **High** (no seal) | ~~None (RDP L2)~~ ✅ Low at crypto layer on sealed production units (BOOT007); RMA inspection workflow for the seal-breaking case |
 
 ---
 
@@ -217,26 +265,62 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | T7 | ARM001 | Arming Gate |
 | T8 | POST001 (CRC32) | POST |
 | T9 | POST004 | POST |
-| T10 | BOOT001, BOOT003 | Secure Boot, Tamper Resistance |
-| T11 | BOOT003 | Tamper Resistance (chip-level lockdown) |
-| T12 | BOOT002 | Root of Trust (immutable trust anchor) |
-| T13 | BOOT003 | Tamper Resistance |
+| T10 | BOOT001, ~~BOOT003~~ ✅ BOOT005 | Secure Boot, Tamper Resistance |
+| T11 | ~~BOOT003~~ ✅ BOOT005 + BOOT006 + BOOT007 | Tamper Resistance (operational lockdown — bootstrap-trust + seal) |
+| ~~T12~~ → T12' | ~~BOOT002~~ ✅ BOOT005 + BOOT006 + BOOT007 | Root of Trust (bootloader-embedded pubkey, protected operationally) |
+| T13 | ~~BOOT003~~ ✅ BOOT007 | Tamper Resistance (seal-gated SWD path + RMA inspection) |
 
 ---
 
 ## 6. Assumptions and Boundaries
 
-**In scope:**
+**In scope (cryptographic layer — fully blocked by signature chain):**
 - Firmware integrity from build to boot
 - Manufacturer signing and drone-side verification
+- USB-only attackers (remote, opportunistic) — every software write
+  path to flash is gated by signature verification: UPD001 covers
+  Path B (MAVLink-FTP), BOOT001 covers app fw on every boot, BOOT005
+  closes Path A (DFU), BOOT006 makes `bl_update` the only sector-0
+  write path and gates it on a signed app fw
 - GCS display of security status
 
-**Out of scope (for Level 1):**
+**Physical-attacker boundary (out of scope at the cryptographic layer; compensated procedurally):**
+
+⚠️ **NEW BOUNDARY STATEMENT — 2026-05-04 (ADR-013).** Under the
+amended architecture, an attacker who **disassembles the airframe
+AND breaks the Cube enclosure** to reach SWD/JTAG pads is **out of
+scope at the cryptographic layer**. This boundary is required because
+the CubeOrange+ carriers we ship have no externally accessible BOOT0,
+making OTP write and RDP Level 2 burn operationally infeasible (they
+would require breaking the same Hex factory seal we are now relying
+on). The previous architecture (BOOT002 OTP + BOOT003 RDP L2) would
+have moved this attacker class fully in-scope at the silicon layer;
+the amended architecture cannot.
+
+The compensating procedural controls are:
+
+- **Tamper-evident seals (BOOT007)** on airframe AND on the Cube
+  enclosure, applied at our manufacturing facility before shipping.
+  Reaching SWD/JTAG visibly breaks one or both seals.
+- **STM32 96-bit UID + seal serial recorded in QMS** at manufacture.
+  The pair forms a per-unit fingerprint that persists across the
+  unit's lifetime.
+- **RMA inspection workflow.** Units returning with broken seals
+  are quarantined and not re-flown without re-provisioning (full
+  factory reset → secure bootloader re-install → reseal → re-record
+  UID + new seal serial in QMS).
+
+This is the same standard as physical anti-tamper on production
+avionics at this tier (and the standard ArduPilot ships with on
+hundreds of thousands of fielded units).
+
+**Out of scope (for Level 1, unchanged):**
 - GCS-to-drone authentication (Phase 7 — deferred)
 - Network-based attacks on telemetry (covered by MAVLink 2 signing in future)
-- Physical anti-tamper (hardware enclosure design)
-- Supply chain security of hardware components
+- Supply chain security of hardware components beyond the receive-and-verify-bootloader-hash step in MANUFACTURING_RUNBOOK.md
 - Denial of service (radio jamming)
+- Lab-grade fault injection (voltage glitch, EM, clock glitch — nation-state-actor class)
+- Chip decap and physical rewriting of internal flash — outside Level 1 scope
 
 **Assumptions:**
 - Manufacturer build environment is physically secured
@@ -244,9 +328,9 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
   key never leaves controlled storage
 - PX4 NuttX kernel is not compromised (trusted computing base)
 - SD card is accessible to an attacker with physical access to the drone
-- Production hardware will have RDP Level 2 burned before deployment in
+- ~~Production hardware will have RDP Level 2 burned before deployment in
   regulated airspace; dev boards remain at RDP 0 with that acknowledged
-  as out-of-scope for production threat assumptions
+  as out-of-scope for production threat assumptions~~ ⚠️ **AMENDED 2026-05-04 (ADR-013):** ✅ **Production hardware will have the secure bootloader installed (BOOT001/005/006) AND tamper-evident seal applied (BOOT007) AND UID + seal serial recorded in QMS, before deployment in regulated airspace.** Dev boards run the dev bootloader (no DFU-refuse) and have no seal applied; dev-vs-production segregation is operationally enforced (dev units never flown in regulated airspace), unchanged from the original assumption.
 
 ---
 
@@ -258,7 +342,7 @@ controller, and show me what stops each one."*
 
 ### 7.1 The chain of trust
 
-Once Phase 5b ships, the trust chain on a CubeOrange+ is:
+🚫 **RETIRED 2026-05-04 (ADR-013) — original (OTP + RDP L2):**
 
 ```
 [OTP: manufacturer pubkey]              ← write-once silicon fuses
@@ -279,6 +363,33 @@ Once Phase 5b ships, the trust chain on a CubeOrange+ is:
 [ARM gate]                              ← refuses to arm if any check failed
 ```
 
+✅ **CURRENT 2026-05-04 (ADR-013/014/015) — bootstrap-trust + sealing:**
+
+Once Phase 5b ships, the trust chain on a CubeOrange+ is:
+
+```
+[Tamper-evident seal: airframe + Cube]  ← procedural; broken seal = RMA quarantine
+        │ blocks SWD/JTAG access without visible damage
+        │ DFU entry: software-refused (ADR-014)
+        ▼
+[Bootloader: pubkey embedded inside]    ← integrity from bootstrap-trust + seal
+        │ contains firmware-verify logic; uses its embedded pubkey symbol
+        │ refuses DFU mode entry (BOOT005)
+        │ verifies app fw signature on every boot
+        ▼
+[Firmware: SIGNED by manufacturer]      ← bootloader checks the signature
+        │ contains the secure bootloader image in ROMFS (ADR-015)
+        │ contains manifest-verify logic; uses pubkey embedded in firmware
+        │ verifies manifest signature on every boot
+        │ `bl_update` from QGC writes sector 0 with the ROMFS-embedded bootloader
+        ▼
+[manifest.bin: SIGNED by manufacturer]  ← firmware checks the signature
+        │ contains registered checksums (code_hash, data_hash, board_id)
+        │ POST recomputes and compares
+        ▼
+[ARM gate]                              ← refuses to arm if any check failed
+```
+
 **Important note on terminology.** Industry literature often says "signed
 bootloader" to mean a bootloader whose own signature is verified by silicon
 below it (Boot ROM). Apple iPhone, Android with a Secure SoC, STM32MPU, and
@@ -289,25 +400,39 @@ DFU loader that doesn't verify anything. Our BOOT001 is therefore a
 *signed-and-verified-at-boot* bootloader. The bootloader's own integrity is
 guaranteed by:
 
-- Factory-controlled flashing of a known-good bootloader binary
-- RDP Level 2 (BOOT003) physically preventing replacement post-burn
+- Factory-controlled first-install at our facility (verify factory
+  bootloader hash on receipt → flash signed app fw → trigger
+  `bl_update` to install secure bootloader → verify → seal)
+- ~~RDP Level 2 (BOOT003) physically preventing replacement post-burn~~
+  ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **Bootstrap-trust + tamper-evident
+  seal:** sector 0 is only writable via `bl_update` from a running,
+  manufacturer-signed app fw (BOOT006); DFU is software-refused (BOOT005);
+  SWD/JTAG access requires visibly breaking the seal (BOOT007). Same end
+  property — "the bootloader on a deployed unit is the bootloader the
+  manufacturer intended" — via a different mechanism.
 
 We additionally sign the bootloader binary at build time so factory tooling
 can verify it before programming, but no runtime check on this signature
-happens on this chip. This is a different mechanism than Apple/Android but
-provides the same property: the bootloader running on a deployed unit is
-the bootloader we intended.
+happens on this chip. This is the same architectural pattern ArduPilot
+ships with: it is validated across hundreds of thousands of fielded units.
 
-Each layer's trust anchor is protected by the layer above it (or by
-hardware):
-- The OTP pubkey is protected by the silicon (write-once fuses)
-- The bootloader code is protected by RDP Level 2 (chip refuses external
-  flash writes)
+Each layer's trust anchor is protected by the layer above it (or
+operationally):
+- ~~The OTP pubkey is protected by the silicon (write-once fuses)~~
+  ⚠️ AMENDED. ✅ **The bootloader-embedded pubkey is protected by the
+  same controls that protect the bootloader binary itself: software
+  DFU-refuse + bootstrap-trust via signed `bl_update` + tamper-evident
+  seal on the SWD path.**
+- ~~The bootloader code is protected by RDP Level 2 (chip refuses
+  external flash writes)~~ ⚠️ AMENDED. ✅ **The bootloader code is
+  protected by the bootstrap-trust chain: only `bl_update` from a
+  manufacturer-signed app fw can write sector 0; DFU is refused; SWD
+  is sealed.**
 - The firmware code is protected by the bootloader (signature check on
-  every boot)
-- The manifest is protected by the firmware (signature check in POST)
+  every boot) — unchanged
+- The manifest is protected by the firmware (signature check in POST) — unchanged
 - The arming decision is protected by the manifest (POST result drives
-  the ARM gate)
+  the ARM gate) — unchanged
 
 ### 7.2 Boot sequence in detail
 
@@ -317,15 +442,25 @@ On every power-on or reset of a Phase-5b-ready CubeOrange+:
    (typically `0x08000000`). This is fixed by the chip's reset
    vector — the CPU has no way to skip the bootloader.
 2. Bootloader initializes minimal hardware (clocks, RAM).
-3. Bootloader reads the manufacturer RSA-3072 public key from the
+3. ~~Bootloader reads the manufacturer RSA-3072 public key from the
    STM32H7 OTP region (e.g. `0x08FFF000`–`0x08FFF3FF`). Read access
    to OTP is via memory-mapped I/O, internal to the chip — no
-   external path can intercept or modify this read.
+   external path can intercept or modify this read.~~
+   ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **Bootloader uses its
+   embedded RSA-3072 public key** — a constant data symbol compiled
+   into the bootloader binary at build time, sourced from
+   `pki/manufacturer/public/manufacturer_public.pem`. The pubkey lives
+   inside sector 0 (the bootloader region) and is read via normal
+   constant-data access — no external path can intercept or modify
+   this read. Substituting the pubkey requires writing sector 0,
+   which is closed by BOOT005 (DFU refused) + BOOT006 (`bl_update`
+   requires signed app fw) + BOOT007 (SWD gated by seal).
 4. Bootloader reads the application firmware's signature (appended at
    a known offset in the firmware image).
 5. Bootloader computes SHA-256 over the application firmware region.
-6. Bootloader runs RSA-PSS-Verify(pubkey_from_OTP, SHA-256(firmware),
-   signature). mbedTLS performs the math.
+6. Bootloader runs RSA-PSS-Verify(embedded_pubkey, SHA-256(firmware),
+   signature). libtomcrypt performs the math (already linked into
+   PX4 / NuttX; no new crypto dependency).
 7. **PASS:** bootloader executes a `BX` jump to the firmware reset
    vector. Firmware now controls the CPU.
    **FAIL:** bootloader logs the failure to a known flash region,
@@ -348,32 +483,54 @@ shows the attack, the layer that stops it, and the residual risk.
 | # | Attack | Stopped by | Residual risk |
 |---|--------|-----------|---------------|
 | 1 | Replace firmware via MAVLink-FTP (over the air or USB through QGC) | UPD001 (QGC + FC verify .fwbundle signature) AND BOOT001 (bootloader re-verifies on next boot) | Requires manufacturer private key |
-| 2 | Replace firmware via stock STM32 DFU (USB + BOOT button) | BOOT001 (firmware refuses to launch on next boot) AND BOOT003 (DFU disabled at chip level) | None after RDP L2 |
-| 3 | Replace bootloader itself with one that skips verification | BOOT003 (RDP L2 disables both DFU and SWD writes — no external write path to bootloader region) | None after RDP L2; bootloader's trust anchor is in OTP, not in bootloader code, so even a copied bootloader cannot substitute its own key |
+| 2 | Replace firmware via stock STM32 DFU (USB + BOOT button) | BOOT001 (firmware refuses to launch on next boot) AND ~~BOOT003 (DFU disabled at chip level)~~ ✅ **BOOT005 (secure bootloader software-refuses DFU mode entry)**. Also: on the Hex carrier, BOOT0 is not externally accessible — asserting BOOT0 itself requires breaking the seal. | ~~None after RDP L2~~ ✅ Low at the crypto layer; physical-attacker class handled procedurally |
+| 3 | Replace bootloader itself with one that skips verification | ~~BOOT003 (RDP L2 disables both DFU and SWD writes — no external write path to bootloader region)~~ ✅ **BOOT005 (DFU refused) + BOOT006 (`bl_update` is the only sector-0 write path; gated by signature verification of the running app fw containing the new bootloader image) + BOOT007 (SWD/JTAG access requires breaking the seal)** | ~~None after RDP L2; bootloader's trust anchor is in OTP, not in bootloader code, so even a copied bootloader cannot substitute its own key~~ ✅ Low at the crypto layer on sealed production units; bootloader's trust anchor is now embedded in the bootloader binary, so an attacker who could write sector 0 could substitute a key — but every write path is closed (DFU refused, `bl_update` requires signed fw, SWD gated by seal). Physical-attacker residual handled procedurally. |
 | 4 | Tamper with `manifest.bin` only (claim attacker firmware's hashes) | POST001 manifest signature check (any change invalidates the RSA-PSS signature) | Requires manufacturer private key |
 | 5 | Patch firmware binary to swap the embedded manifest-verify pubkey | BOOT001 (any change to firmware bytes breaks its own signature) | Requires manufacturer private key |
-| 6 | Overwrite the OTP-resident pubkey with attacker's pubkey | OTP write-once silicon (T12) — bits cannot be erased; setting more bits to 1 corrupts our key, fails closed | None — hardware-enforced |
-| 7 | Use SWD/JTAG debugger to halt CPU and force the verify result to "pass" | BOOT003 (RDP L2 permanently disables SWD/JTAG) | None on production units; accepted on dev boards |
-| 8 | Voltage / clock / EM glitch at the verify branch (fault injection) | Out of DGCA Level 1 scope. RDP L2 raises the equipment bar (no debug header to attack electrically). | Acknowledged residual risk; mitigation requires HSM-class silicon |
+| 6 | ~~Overwrite the OTP-resident pubkey with attacker's pubkey~~ ✅ **Overwrite the bootloader-embedded pubkey with attacker's pubkey** | ~~OTP write-once silicon (T12) — bits cannot be erased; setting more bits to 1 corrupts our key, fails closed~~ ✅ **Same controls as row 3** (BOOT005 + BOOT006 + BOOT007) — the embedded pubkey lives in the bootloader binary in sector 0, so substituting it requires writing sector 0, which every external path now blocks. See T12'. | ~~None — hardware-enforced~~ ✅ Low at the crypto layer on sealed production units; the original "fails-closed at the silicon layer" property is replaced by an operational guarantee (consistent with ArduPilot's deployed pattern) |
+| 7 | Use SWD/JTAG debugger to halt CPU and force the verify result to "pass" | ~~BOOT003 (RDP L2 permanently disables SWD/JTAG)~~ ✅ **BOOT007 (tamper-evident seal on the SWD pads) + RMA inspection workflow.** The seal-breaking step leaves visible evidence; returning units with broken seals are quarantined. | ~~None on production units; accepted on dev boards~~ ✅ Low at the crypto layer on sealed production units; physical-attacker residual handled procedurally |
+| 8 | Voltage / clock / EM glitch at the verify branch (fault injection) | Out of DGCA Level 1 scope. ~~RDP L2 raises the equipment bar (no debug header to attack electrically).~~ ✅ The tamper-evident seal raises the same equipment bar (no exposed pads to attack electrically without visibly breaking the seal). | Acknowledged residual risk; mitigation requires HSM-class silicon |
 | 9 | Forge an RSA-3072 signature without the private key | Cryptography (NIST recommends RSA-3072 past 2030; ~2^128 work to brute-force) | Out of practical reach |
 | 10 | Compromise the manufacturer's private key | Operational controls: HSM / offline storage, key ceremony, access controls | Single point of failure for any PKI-based system; same exposure as Apple/Microsoft/Google software signing |
 | 11 | Supply chain — inject malicious code into PX4 source before signing | Out of secure-boot scope. Mitigated by reproducible builds, code review, controlled build host | Acknowledged; not a software-attack-against-the-device vector |
+| 12 ⭐ | Supply-chain compromise of the **first-install** trust window (factory PX4 bootloader trusts anything; we use it once to load our first signed app fw) | Verify factory bootloader hash on receipt at our facility before first install (MANUFACTURING_RUNBOOK.md step 2); first install performed only at our trusted facility; sealed before shipping. | Acknowledged residual; same control category as supply-chain trust generally — mitigated procedurally |
 
 ### 7.4 The property the chain guarantees
 
-> Every byte of code the CPU executes was authored by a party
+> ~~Every byte of code the CPU executes was authored by a party
 > holding the manufacturer's RSA-3072 private key, verified at boot
 > against a public key physically fused into the chip and unreachable
-> from any software path.
+> from any software path.~~
 
-The two genuine residual risks are:
+⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **Updated property statement:**
+
+> Every byte of code the CPU executes was authored by a party
+> holding the manufacturer's RSA-3072 private key, verified at boot
+> against a public key embedded in the bootloader binary, with every
+> external path to overwrite that bootloader closed by software
+> (DFU refused, `bl_update` requires a signed app fw) or by
+> tamper-evident sealing (SWD gated by a seal that, if broken,
+> triggers RMA quarantine).
+
+The genuine residual risks are:
 1. **Manufacturer key compromise** — operational, not technical.
    Same risk class as every signed-software ecosystem on earth.
 2. **Lab-grade physical attack** (chip decap, advanced fault
    injection) — out of DGCA Level 1 scope.
+3. **Physical attacker who breaks the seal to reach SWD/JTAG** —
+   acknowledged out-of-scope at the cryptographic layer (forced by
+   the carrier's no-accessible-BOOT0 constraint, ADR-013); compensated
+   procedurally by tamper-evident sealing + UID/seal-serial tracking
+   + RMA inspection (Section 6).
+4. **First-install supply-chain trust window** — the factory PX4
+   bootloader trusts anything; we use it once at our facility to load
+   our first signed app fw, then immediately install the secure
+   bootloader via `bl_update` and seal. Mitigated by verifying the
+   factory bootloader hash on receipt and performing first install
+   only at our trusted facility (MANUFACTURING_RUNBOOK.md).
 
-Everything else either fails-closed or is impossible without breaking
-either RSA-3072 or the silicon itself.
+Everything else either fails-closed cryptographically or is closed
+operationally with detectable evidence.
 
 ### 7.5 Why flash encryption is not required
 
@@ -393,28 +550,43 @@ reviewer can recompute them. What matters is that the device only
 accepts a checksum the manufacturer authored. Our signed-manifest +
 signed-firmware chain delivers exactly that.
 
-In addition, RDP Level 2 already prevents external flash readout
+~~In addition, RDP Level 2 already prevents external flash readout
 (returns zeros), so flash encryption would only add value against
 attack scenarios already out of Level 1 scope (chip decap, advanced
-fault injection). For productization or the audited reference parity, flash encryption
-can be added later as BOOT004 — it is not required for certification.
+fault injection).~~ ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **In
+addition, the tamper-evident seal (BOOT007) makes external flash
+readout via SWD detectable** — reading flash requires connecting a
+debug probe to SWD pads, which requires visibly breaking the seal.
+Units returning with broken seals are quarantined on RMA receipt.
+Flash encryption would only add value against attack scenarios already
+out of Level 1 scope (chip decap, advanced fault injection, and the
+narrow case of an attacker who reads flash without re-flying the unit
+afterward). For productization or the audited reference parity, flash encryption can
+be added later as BOOT004 — it is not required for certification.
 
 ---
 
 ## 8. Prior Art — Comparable Architectures
 
-The architecture we are deploying (immutable hardware-resident
-trust anchor → verifying bootloader → signed firmware → signed
+The architecture we are deploying (~~immutable hardware-resident
+trust anchor~~ ✅ **operationally-controlled trust anchor (bootloader-embedded
+pubkey, protected by software DFU-refuse + bootstrap-trust + tamper-evident
+seal)** → verifying bootloader → signed firmware → signed
 config/manifest) is the standard pattern for production secure boot.
 
 In systems with an authenticating Boot ROM (Apple, Android with Secure
 SoC, STM32MPU, STM32H5), the bootloader is itself signature-verified at
 runtime by silicon below it. On the STM32H743/H753 used here, the
-bootloader's integrity is provided by RDP Level 2 (chip-level write
-lockdown) rather than runtime signature verification. The end property —
+bootloader's integrity is provided by ~~RDP Level 2 (chip-level write
+lockdown)~~ ⚠️ **AMENDED 2026-05-04 (ADR-013):** ✅ **bootstrap-trust
+(`bl_update` from a signed app fw is the only sector-0 write path)
++ software DFU-refuse + tamper-evident sealing of airframe + Cube
+enclosure** rather than runtime signature verification. The end property —
 the bootloader on a deployed unit is the bootloader the manufacturer
-intended — is identical; the mechanism differs.
-It is used at scale by:
+intended — is identical; the mechanism differs. **This is the same
+architectural pattern ArduPilot ships with** (see ADR-013 prior-art
+citations) and is in field deployment on hundreds of thousands of
+units. It is used at scale by:
 
 | System | Trust anchor | Verifies | At scale |
 |---|---|---|---|
@@ -426,33 +598,59 @@ It is used at scale by:
 
 Critical observations:
 
-- **Hardware-resident trust anchor is universal.** Every production
+- ~~**Hardware-resident trust anchor is universal.** Every production
   secure-boot system stores the root public key (or its hash) in
   silicon — Boot ROM, OTP fuses, or eFuses. This is what makes the
-  trust anchor immutable.
+  trust anchor immutable.~~
+  ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **Hardware-resident OR
+  operationally-controlled trust anchor.** Most production secure-boot
+  systems store the root key in silicon (Boot ROM / OTP / eFuses).
+  Some — most prominently ArduPilot — embed it in the bootloader
+  binary and protect that binary via a chain-of-trust install path
+  (ROMFS-bundled bootloader updated only via signed app fw) plus
+  tamper-evident sealing. The end property "an attacker cannot
+  substitute the trust anchor" is preserved by either mechanism. We
+  use the ArduPilot pattern because the CubeOrange+ carrier we ship
+  has no accessible BOOT0 for OTP/RDP-style hardware lockdown.
 - **Asymmetric (signature) crypto, not symmetric (encryption), is
   the standard for the trust chain.** AES is sometimes used
   alongside for *confidentiality* (Apple's Effaceable Storage,
   STM32H5 PROC_FILTERING for IP protection) but the *authenticity*
   check is always signature-based.
-- **STM32 specifically supports this exact pattern.** ST's own
+- ~~**STM32 specifically supports this exact pattern.** ST's own
   STM32MPU secure boot stores a public key hash in OTP and uses
   ECDSA signature verification in ROM. We are using a CubeOrange+
   (STM32H7), which has equivalent OTP and RDP capabilities — our
   Phase 5b is essentially porting ST's own MPU secure-boot pattern
-  to the STM32H7 MCU using the PX4 bootloader as the verifier.
-- **RDP Level 2 (or its equivalent) is mandatory for production.**
+  to the STM32H7 MCU using the PX4 bootloader as the verifier.~~
+  ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **Equivalent capability
+  exists in STM32H7 (OTP + RDP), but is operationally infeasible on
+  the carrier we ship (no accessible BOOT0).** A future move to
+  STM32H5 (with RSS / authenticating Boot ROM) or to a custom
+  CubeOrange+ carrier with accessible BOOT0 would let us re-enable
+  the silicon-lockdown path; see [ARCHITECTURE.md §14](ARCHITECTURE.md).
+- ~~**RDP Level 2 (or its equivalent) is mandatory for production.**
   Apple uses fused chip configuration; Android uses locked
   bootloader + TEE; UEFI uses Setup Mode lockdown; STM32MPU uses
   the OTP "device closed" bit + RDP L2. Our Phase 5b plan matches
   this pattern — RDP L2 is what makes the deployed unit's trust
-  chain immutable.
+  chain immutable.~~
+  ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **An immutable-or-controlled
+  trust chain is mandatory for production; the mechanism varies.**
+  Apple uses fused chip configuration; Android uses locked bootloader
+  + TEE; UEFI uses Setup Mode lockdown; STM32MPU uses the OTP "device
+  closed" bit + RDP L2; **ArduPilot uses signed-`bl_update` + DFU-refuse
+  + sealing.** Our Phase 5b matches the ArduPilot pattern — bootstrap-
+  trust + tamper-evident sealing makes the deployed unit's trust
+  chain operationally immutable in lieu of a silicon lockdown step.
 
 This is not a novel or experimental architecture. It is the
 mainstream pattern, with billions of devices in field deployment
 (Apple alone), supported by the silicon vendor's own reference
-documentation (ST), and codified in industry specifications (UEFI,
-ARM TF-A).
+documentation (ST), codified in industry specifications (UEFI,
+ARM TF-A), and validated specifically for the
+embedded-pubkey + ROMFS-bootloader + DFU-refuse variant by the
+ArduPilot project across hundreds of thousands of fielded units.
 
 ---
 
