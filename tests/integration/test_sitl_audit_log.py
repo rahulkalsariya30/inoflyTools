@@ -6,8 +6,8 @@ End-to-end SITL test for LOG001 - Per-file RSA signed audit log.
 Boots PX4 SITL, runs the secure_boot module to trigger an EVENT_POST_RESULT,
 then verifies that:
   1. audit_log.bin exists in SITL storage and contains at least one entry
-  2. Each entry is 132 bytes with valid magic and CRC32
-  3. audit_log.sig exists and is exactly 384 bytes (RSA-3072 ciphertext)
+  2. Each entry is 316 bytes with valid magic and CRC32
+  3. audit_log.sig exists and is exactly 256 bytes (RSA-2048 ciphertext)
   4. Decrypting the .sig with the manufacturer private key yields a SHA-256
      that matches the SHA-256 of the .bin file (proves the signing chain works)
 
@@ -39,9 +39,9 @@ SIG_PATH_WSL     = f"{AUDIT_DIR_WSL}/audit_log.sig"
 
 PRIVATE_KEY = PROJECT_ROOT / "pki" / "manufacturer" / "private" / "manufacturer_private.pem"
 
-ENTRY_SIZE       = 132
+ENTRY_SIZE       = 316
 ENTRY_MAGIC      = 0x4C4F4701
-RSA_SIG_SIZE     = 384
+RSA_SIG_SIZE     = 256
 
 SITL_TIMEOUT_SEC = 25
 

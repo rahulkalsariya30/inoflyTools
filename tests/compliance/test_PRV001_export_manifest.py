@@ -4,8 +4,8 @@ tests/compliance/test_PRV001_export_manifest.py
 Compliance tests for PRV001 — Binary manifest export for drone provisioning
 
 Requirement: PRV001
-  - Binary manifest must be exactly 501 bytes (v2 format with RSA-3072)
-  - Must contain correct magic bytes "INOFLY02"
+  - Binary manifest must be exactly 373 bytes (v3 format with RSA-2048)
+  - Must contain correct magic bytes "INOFLY03"
   - CRC32 must cover all fields except itself
   - RSA-PSS signature must be verifiable with manufacturer public key
   - Tampered fields must fail verification
@@ -77,14 +77,16 @@ def binary_manifest(sample_bundle, keypair):
 
 class TestPRV001_BinaryFormat:
 
-    def test_PRV001_output_is_exactly_501_bytes(self, binary_manifest):
+    def test_PRV001_output_is_exactly_373_bytes(self, binary_manifest):
         assert len(binary_manifest) == TOTAL_SIZE
+        assert len(binary_manifest) == 373
 
     def test_PRV001_starts_with_magic_bytes(self, binary_manifest):
         assert binary_manifest[:8] == MAGIC
 
-    def test_PRV001_format_version_is_2(self, binary_manifest):
+    def test_PRV001_format_version_is_3(self, binary_manifest):
         assert binary_manifest[8] == FORMAT_VERSION
+        assert binary_manifest[8] == 3
 
     def test_PRV001_code_hash_is_at_correct_offset(self, sample_bundle, binary_manifest):
         """code_hash starts at byte 9 and is 32 bytes."""
@@ -98,28 +100,28 @@ class TestPRV001_BinaryFormat:
         stored = binary_manifest[41:73]
         assert stored == expected
 
-    def test_PRV001_signature_is_384_bytes(self, binary_manifest):
-        """RSA-3072 signature at offset 73, always exactly 384 bytes."""
+    def test_PRV001_signature_is_256_bytes(self, binary_manifest):
+        """RSA-2048 signature at offset 73, always exactly 256 bytes."""
         sig_bytes = binary_manifest[73:73 + SIG_MAX_LEN]
-        assert len(sig_bytes) == 384
-        # sig_len field (uint16 at offset 457) should be 384
+        assert len(sig_bytes) == 256
+        # sig_len field (uint16 at offset 329) should be 256
         sig_len = struct.unpack_from("<H", binary_manifest, 73 + SIG_MAX_LEN)[0]
-        assert sig_len == 384
+        assert sig_len == 256
 
     def test_PRV001_board_id_is_stored_correctly(self, sample_bundle, keypair):
-        """board_id stored as little-endian uint16 at offset 459."""
+        """board_id stored as little-endian uint16 at offset 331."""
         bundle = dict(sample_bundle)
         bundle["manifest"] = dict(sample_bundle["manifest"])
         bundle["manifest"]["board_id"] = 50
         binary = export_binary_manifest(bundle, private_key_path=keypair["private"])
-        # board_id offset: 8 + 1 + 32 + 32 + 384 + 2 = 459
-        board_id_bytes = binary[459:461]
+        # board_id offset: 8 + 1 + 32 + 32 + 256 + 2 = 331
+        board_id_bytes = binary[331:333]
         assert struct.unpack("<H", board_id_bytes)[0] == 50
 
     def test_PRV001_version_string_is_null_terminated(self, binary_manifest):
         """Version field must be null-terminated within the 32-byte buffer."""
-        # version offset: 459 + 2 = 461
-        version_field = binary_manifest[461:461 + VERSION_LEN]
+        # version offset: 331 + 2 = 333
+        version_field = binary_manifest[333:333 + VERSION_LEN]
         assert b"\x00" in version_field
 
     def test_PRV001_struct_format_size_matches_total(self):

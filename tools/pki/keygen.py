@@ -4,16 +4,17 @@ tools/pki/keygen.py
 Manufacturer Key Generation Tool
 Requirement: ROT001 - Root of Trust keypair for firmware manufacturer
 
-Generates an RSA-3072 keypair:
+Generates an RSA-2048 keypair:
   - Private key: used by manufacturer to SIGN firmware, manifests, and update bundles
   - Public key:  stored on flight module to VERIFY signatures and ENCRYPT log hashes
 
-WHY RSA-3072?
-  - Approved by NIST (SP 800-57), accepted by aviation regulators
-  - 128-bit security level — recommended for use beyond 2030
-  - Supports both signing (firmware/manifests) and encryption (log hashes)
-  - Single keypair for all operations — matches the audited reference-audited approach
-  - Supported by mbedTLS on STM32 and OpenSSL on SITL
+WHY RSA-2048?
+  - Approved by NIST (SP 800-57 R5) for new signatures through end of 2030
+  - 112-bit security level — adequate for our 5-year certified deployment horizon
+  - Supports both signing (firmware/manifests) and encryption (log hashes) with one keypair
+  - Unifies bootloader + app-fw on a single algorithm (resolves prior ECDSA + RSA drift)
+  - Smaller bignum than RSA-3072 — saves ~15 KB in the bootloader binary
+  - Supported by libtomcrypt on NuttX and OpenSSL on host/SITL
 
 WHY not ECDSA?
   - ECDSA is signature-only — cannot encrypt with public key
@@ -29,8 +30,9 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 
-# RSA key size — 3072 bits provides 128-bit security (NIST SP 800-57)
-RSA_KEY_SIZE = 3072
+# RSA key size — 2048 bits provides 112-bit security (NIST SP 800-57 R5,
+# acceptable for new signatures through 2030)
+RSA_KEY_SIZE = 2048
 
 # Output paths relative to project root
 PKI_DIR = Path(__file__).resolve().parent.parent.parent / "pki" / "manufacturer"
@@ -40,7 +42,7 @@ PUBLIC_KEY_PATH  = PKI_DIR / "public"  / "manufacturer_public.pem"
 
 def generate_keypair() -> tuple[bytes, bytes]:
     """
-    Generate an RSA-3072 keypair.
+    Generate an RSA-2048 keypair.
 
     Returns:
         (private_key_pem, public_key_pem) as bytes
@@ -48,7 +50,7 @@ def generate_keypair() -> tuple[bytes, bytes]:
     The private key is encrypted with a passphrase if provided,
     otherwise stored unencrypted (only do this in a secure environment).
     """
-    # Generate RSA-3072 private key with standard public exponent 65537
+    # Generate RSA-2048 private key with standard public exponent 65537
     private_key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=RSA_KEY_SIZE,
@@ -118,7 +120,7 @@ if __name__ == "__main__":
             print("Aborted.")
             exit(0)
 
-    print("Generating RSA-3072 manufacturer keypair...")
+    print("Generating RSA-2048 manufacturer keypair...")
     private_key_pem, public_key_pem = generate_keypair()
     save_keypair(private_key_pem, public_key_pem)
     print("Done.")

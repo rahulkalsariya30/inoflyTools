@@ -6,8 +6,8 @@ Offline verification of a drone-produced audit log.
 The flight controller signs the audit log per the audited reference Section 8:
   1. FC writes 132-byte entries to audit_log.bin (signature field zero, CRC32 only).
   2. After each write, FC computes SHA-256 of the complete audit_log.bin.
-  3. FC encrypts the 32-byte hash with the embedded RSA-3072 PUBLIC key
-     (PKCS#1 v1.5) and writes 384 bytes to audit_log.sig.
+  3. FC encrypts the 32-byte hash with the embedded RSA-2048 PUBLIC key
+     (PKCS#1 v1.5) and writes 256 bytes to audit_log.sig.
 
 Manufacturer verification is the inverse: decrypt audit_log.sig with the
 PRIVATE key, then compare against SHA-256(audit_log.bin). If they match,
@@ -38,8 +38,8 @@ def verify(log_path: Path, sig_path: Path, key_path: Path) -> bool:
     sig_data = sig_path.read_bytes()
     key_pem = key_path.read_bytes()
 
-    if len(sig_data) != 384:
-        print(f"FAIL: signature is {len(sig_data)} bytes, expected 384 (RSA-3072)")
+    if len(sig_data) != 256:
+        print(f"FAIL: signature is {len(sig_data)} bytes, expected 256 (RSA-2048)")
         return False
 
     private_key = serialization.load_pem_private_key(key_pem, password=None)
@@ -69,9 +69,9 @@ def main() -> int:
     parser.add_argument("--log", required=True, type=Path,
                         help="Path to audit_log.bin")
     parser.add_argument("--sig", required=True, type=Path,
-                        help="Path to audit_log.sig (384 bytes)")
+                        help="Path to audit_log.sig (256 bytes)")
     parser.add_argument("--key", required=True, type=Path,
-                        help="Manufacturer RSA-3072 private key (PEM)")
+                        help="Manufacturer RSA-2048 private key (PEM)")
     args = parser.parse_args()
 
     for p in (args.log, args.sig, args.key):

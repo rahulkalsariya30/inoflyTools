@@ -5,7 +5,7 @@ Compliance tests for UPD001 — Drone rejects unsigned firmware update
 
 Requirement: UPD001 (DGCA Section 7.1 — Secure Update)
   - The drone MUST reject any firmware update that is not signed by the
-    manufacturer's RSA-3072 key
+    manufacturer's RSA-2048 key
   - Unsigned bundles must be rejected before flashing
   - Tampered bundles (modified after signing) must be rejected
   - Only bundles signed with the correct manufacturer key are accepted
@@ -15,7 +15,7 @@ Implementation approach:
   - QGC side: SecureFirmwareController verifies .fwbundle before uploading
   - Drone side: FirmwareUpdateGatekeeper verifies staged manifest
     (CRC32 + RSA-PSS signature) before authorizing bootloader reboot
-  - Both use the same crypto: RSA-3072 PSS + SHA-256
+  - Both use the same crypto: RSA-2048 PSS + SHA-256
 
 These tests verify the bundle verification logic that both QGC and the
 drone's FirmwareUpdateGatekeeper use to reject unsigned/tampered firmware.
@@ -261,7 +261,7 @@ class TestUPD001ManifestRejection:
         """A manifest with a tampered signature must be rejected."""
         _, pub_path = keypair
         data = bytearray(valid_binary_manifest)
-        # Tamper with signature area (offset 73, length 384)
+        # Tamper with signature area (offset 73, length 256)
         data[73] ^= 0xFF
         data[74] ^= 0xFF
         # Recompute CRC to make it pass the CRC check but fail signature

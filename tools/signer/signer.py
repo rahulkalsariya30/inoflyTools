@@ -17,7 +17,7 @@ WHAT gets signed?
   - The manifest is serialized to canonical JSON (sorted keys, no extra
     whitespace) before signing. This ensures the signature is the same
     regardless of how the JSON was originally formatted.
-  - RSA-3072 with PSS padding and SHA-256 (same keypair from Phase 1.1 / ROT001)
+  - RSA-2048 with PSS padding and SHA-256 (same keypair from Phase 1.1 / ROT001)
 
 WHY RSA-PSS (not PKCS#1 v1.5)?
   - PSS is the modern, provably-secure RSA signature scheme

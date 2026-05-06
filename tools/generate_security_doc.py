@@ -166,7 +166,7 @@ def build():
         ("Step 1 — We sign the firmware before release",
          "When we build a firmware release, our build tools automatically calculate a "
          "unique fingerprint (SHA-256 checksum) for the software. A digital signature "
-         "is then applied using our private cryptographic key (RSA-3072) — similar to a wax seal "
+         "is then applied using our private cryptographic key (RSA-2048) — similar to a wax seal "
          "on an envelope. This signed bundle is what gets shipped."),
         ("Step 2 — The signed bundle is loaded onto the drone",
          "A provisioning tool writes a small 'manifest' file onto the drone's storage. "
@@ -223,7 +223,7 @@ def build():
         "All signing and verification in this system is built on industry-standard "
         "cryptographic algorithms approved by NIST and required by DGCA:"
     )
-    add_bullet(doc, "Signing Algorithm: RSA-3072 with PSS padding — a widely trusted algorithm used in banking, aviation, and government systems. 3072-bit keys provide 128-bit security, recommended by NIST beyond 2030.")
+    add_bullet(doc, "Signing Algorithm: RSA-2048 with PSS padding — a widely trusted algorithm used in banking, aviation, and government systems. 2048-bit keys provide 112-bit security, accepted by NIST SP 800-57 R5 for new signatures through end of 2030.")
     add_bullet(doc, "Hash / Fingerprint: SHA-256 — produces a unique 64-character fingerprint of any file. A single changed bit produces a completely different fingerprint.")
     add_bullet(doc, "GCS-FC Pairing: MAVLink v2 message signing with 32-byte HMAC-SHA256 key — ensures only authorised ground control software can communicate with the drone.")
     add_body(doc, "\nSingle keypair architecture:", bold=True)
@@ -262,7 +262,7 @@ def build():
 
     rows = [
         ("ROT001", "Manufacturer must have a cryptographic identity (private key)",
-         "RSA-3072 keypair generated and stored securely. Private key never leaves the build environment.", "done"),
+         "RSA-2048 keypair generated and stored securely. Private key never leaves the build environment.", "done"),
         ("ROT002", "Public key must be embedded inside the firmware",
          "Public key is compiled into the firmware as a C header file (DER format). The drone always has it available for verification.", "done"),
         ("CHK001", "Firmware code and data must each have a separate fingerprint",
@@ -402,11 +402,11 @@ def build():
     add_heading(doc, "8. Glossary of Key Terms")
 
     terms = [
-        ("RSA-3072 / RSA-PSS", "A digital signature and encryption algorithm. RSA-3072 provides 128-bit security (recommended by NIST beyond 2030). PSS padding is the modern, provably secure signature scheme. The same family of algorithms used to secure online banking and government systems."),
+        ("RSA-2048 / RSA-PSS", "A digital signature and encryption algorithm. RSA-2048 provides 112-bit security (NIST SP 800-57 R5, accepted for new signatures through 2030). PSS padding is the modern, provably secure signature scheme. The same family of algorithms used to secure online banking and government systems."),
         ("SHA-256",          "A fingerprinting algorithm. Given any file, it produces a unique 64-character code. If even one byte of the file changes, the fingerprint is completely different."),
         ("Manifest",         "A small file containing the firmware fingerprints, version number, and board ID — all signed by the manufacturer. The drone keeps this as its reference. 501 bytes in binary format."),
         ("POST",             "Power On Self Test. A check the drone runs automatically on every boot before allowing any flight operations."),
-        ("Root of Trust",    "The manufacturer's RSA-3072 keypair. Private key signs firmware releases and decrypts log signatures (never leaves the build machine). Public key is embedded in firmware for verification and log signing."),
+        ("Root of Trust",    "The manufacturer's RSA-2048 keypair. Private key signs firmware releases and decrypts log signatures (never leaves the build machine). Public key is embedded in firmware for verification and log signing."),
         ("MAVLink Signing",  "MAVLink v2 protocol feature that authenticates every message using a shared 32-byte key (HMAC-SHA256). Ensures only authorised GCS software can control the drone."),
         ("Compliance Parameters", "Safety-critical flight parameters (max altitude, speed, geofence) that are statically compiled into the firmware and cannot be changed at runtime from any ground control station."),
         ("Arming Gate",      "The pre-flight check system in PX4. We added a new check: if POST failed, the drone cannot arm (start motors)."),

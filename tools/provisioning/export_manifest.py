@@ -23,21 +23,21 @@ WHY re-sign in binary format?
   The embedded side reconstructs this same 98-byte payload from the struct
   fields and verifies the RSA-PSS signature.
 
-BINARY MANIFEST FORMAT (security_manifest_t — 504 bytes):
+BINARY MANIFEST FORMAT (security_manifest_t — 373 bytes):
   Offset  Size  Field
   ------  ----  -----
-       0     8  magic        "INOFLY02" — format identifier (v2 for RSA-3072)
-       8     1  format_ver   struct layout version (currently 2)
+       0     8  magic        "INOFLY03" — format identifier (v3 for RSA-2048)
+       8     1  format_ver   struct layout version (currently 3)
        9    32  code_hash    SHA-256 of firmware binary
       41    32  data_hash    SHA-256 of default parameter set
-      73   384  signature    RSA-3072 PSS signature (always exactly 384 bytes)
-     457     2  sig_len      actual signature byte count (384 for RSA-3072)
-     459     2  board_id     target hardware ID (little-endian uint16)
-     461    32  version      firmware version string, null-terminated
-     493     4  created_at   unix timestamp (little-endian uint32)
-     497     4  crc32        CRC32 of bytes 0–496 (little-endian uint32)
+      73   256  signature    RSA-2048 PSS signature (always exactly 256 bytes)
+     329     2  sig_len      actual signature byte count (256 for RSA-2048)
+     331     2  board_id     target hardware ID (little-endian uint16)
+     333    32  version      firmware version string, null-terminated
+     365     4  created_at   unix timestamp (little-endian uint32)
+     369     4  crc32        CRC32 of bytes 0–368 (little-endian uint32)
     ----
-     501     TOTAL
+     373     TOTAL
 
 The CRC32 covers the entire struct except the last 4 bytes (the CRC itself).
 It detects storage corruption — a failed CRC means the flash was corrupted,
@@ -59,18 +59,18 @@ PROJECT_ROOT     = Path(__file__).resolve().parent.parent.parent
 PRIVATE_KEY_PATH = PROJECT_ROOT / "pki" / "manufacturer" / "private" / "manufacturer_private.pem"
 
 # Binary format constants
-MAGIC           = b"INOFLY02"   # 8 bytes — v2 for RSA-3072 manifest format
-FORMAT_VERSION  = 2             # v2: RSA-3072 signatures
+MAGIC           = b"INOFLY03"   # 8 bytes — v3 for RSA-2048 manifest format
+FORMAT_VERSION  = 3             # v3: RSA-2048 signatures
 HASH_LEN        = 32            # SHA-256 output size
-SIG_MAX_LEN     = 384           # RSA-3072 signature size (3072/8 = 384 bytes, always exact)
+SIG_MAX_LEN     = 256           # RSA-2048 signature size (2048/8 = 256 bytes, always exact)
 VERSION_LEN     = 32            # firmware version string buffer size
-TOTAL_SIZE      = 501           # total struct size in bytes
+TOTAL_SIZE      = 373           # total struct size in bytes
 
 # Struct pack format (little-endian, packed):
 # 8s = magic[8], B = format_ver, 32s = code_hash, 32s = data_hash,
-# 384s = signature, H = sig_len, H = board_id, 32s = version,
+# 256s = signature, H = sig_len, H = board_id, 32s = version,
 # I = created_at, I = crc32
-STRUCT_FORMAT   = "<8sB32s32s384sHH32sII"
+STRUCT_FORMAT   = "<8sB32s32s256sHH32sII"
 
 assert struct.calcsize(STRUCT_FORMAT) == TOTAL_SIZE, \
     f"Struct size mismatch: {struct.calcsize(STRUCT_FORMAT)} != {TOTAL_SIZE}"
@@ -101,7 +101,7 @@ def _build_signable_payload(code_hash: bytes, data_hash: bytes,
 def _sign_binary_payload(payload: bytes, private_key_path: Path) -> bytes:
     """
     Sign the binary signable_payload with the manufacturer private key.
-    Returns RSA-PSS signature bytes (384 bytes for RSA-3072).
+    Returns RSA-PSS signature bytes (256 bytes for RSA-2048).
     """
     private_pem = Path(private_key_path).read_bytes()
     private_key = serialization.load_pem_private_key(private_pem, password=None)
@@ -109,7 +109,7 @@ def _sign_binary_payload(payload: bytes, private_key_path: Path) -> bytes:
         payload,
         padding.PSS(
             mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.MAX_LENGTH,
+            salt_length=32,  # SHA-256 length; matches device-side verifier
         ),
         hashes.SHA256(),
     )
@@ -140,7 +140,7 @@ def export_binary_manifest(
         private_key_path: Path to manufacturer private key PEM
 
     Returns:
-        501-byte binary manifest ready to write to the drone's flash storage
+        373-byte binary manifest ready to write to the drone's flash storage
     """
     manifest = signed_bundle["manifest"]
 
@@ -171,7 +171,7 @@ def export_binary_manifest(
 
     if len(sig) != SIG_MAX_LEN:
         raise ValueError(
-            f"RSA-3072 signature must be exactly {SIG_MAX_LEN} bytes, got {len(sig)}."
+            f"RSA-2048 signature must be exactly {SIG_MAX_LEN} bytes, got {len(sig)}."
         )
 
     sig_len = len(sig)
@@ -250,7 +250,7 @@ def verify_binary_manifest(binary_manifest: bytes, public_key_path: Path) -> boo
             payload,
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH,
+                salt_length=32,  # SHA-256 length; matches device-side verifier
             ),
             hashes.SHA256(),
         )

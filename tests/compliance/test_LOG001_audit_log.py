@@ -4,9 +4,9 @@ tests/compliance/test_LOG001_audit_log.py
 Compliance tests for LOG001 — Signed audit log of security events
 
 Requirement: LOG001
-  - Audit log entries must be exactly 132 bytes
+  - Audit log entries must be exactly 316 bytes
   - Each entry must contain correct magic bytes (0x4C4F4701)
-  - CRC32 must cover bytes 0-127 (everything except crc32 field itself)
+  - CRC32 must cover bytes 0-311 (everything except crc32 field itself)
   - Signature field and sig_len are zeroed in per-file signing mode
   - Tampered entries must fail CRC verification
   - Sequence numbers must be monotonically increasing
@@ -14,7 +14,7 @@ Requirement: LOG001
 
 Per-file RSA signing (the audited reference Section 8):
   - FC computes SHA-256 of entire audit_log.bin
-  - Encrypts hash with RSA-3072 public key (PKCS#1 v1.5), saves as audit_log.sig (384 bytes)
+  - Encrypts hash with RSA-2048 public key (PKCS#1 v1.5), saves as audit_log.sig (256 bytes)
   - Manufacturer verifies offline: decrypt .sig with private key, compare SHA-256 hashes
   - NO per-entry signatures — entries have CRC32 integrity only
 """
@@ -37,30 +37,30 @@ from cryptography.hazmat.primitives import hashes, serialization
 AUDIT_ENTRY_MAGIC  = 0x4C4F4701
 AUDIT_FORMAT_VER   = 1
 AUDIT_DETAIL_LEN   = 32
-AUDIT_SIG_MAX_LEN  = 72
-AUDIT_ENTRY_SIZE   = 132
+AUDIT_SIG_MAX_LEN  = 256
+AUDIT_ENTRY_SIZE   = 316
 
 # Struct format: magic(I) format_ver(B) event_type(B) event_result(B) detail_code(B)
-#   sequence_num(I) timestamp_us(Q) detail(32s) signature(72s) sig_len(B)
-#   reserved(3s) crc32(I)
-ENTRY_STRUCT_FORMAT = "<IBBBBI Q 32s 72s B 3s I"
+#   sequence_num(I) timestamp_us(Q) detail(32s) signature(256s) sig_len(H)
+#   reserved(2s) crc32(I)
+ENTRY_STRUCT_FORMAT = "<IBBBBI Q 32s 256s H 2s I"
 
-# Per-file RSA signature size (RSA-3072 = 384 bytes)
-RSA_SIG_SIZE = 384
+# Per-file RSA signature size (RSA-2048 = 256 bytes)
+RSA_SIG_SIZE = 256
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture
 def rsa_keypair(tmp_path):
-    """Generate a fresh RSA-3072 keypair for per-file log signing tests.
+    """Generate a fresh RSA-2048 keypair for per-file log signing tests.
 
     Matches the audited reference Section 8: public key on FC encrypts SHA-256 hash,
     manufacturer's private key decrypts for verification.
     """
     private_key = rsa.generate_private_key(
         public_exponent=65537,
-        key_size=3072,
+        key_size=2048,
     )
     private_pem = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
@@ -105,13 +105,13 @@ def _build_entry(event_type=1, event_result=0, detail_code=0, sequence_num=0,
     # Per-file mode: signature field zeroed, sig_len = 0
     signature = b'\x00' * AUDIT_SIG_MAX_LEN
     sig_len = 0
-    reserved = b'\x00' * 3
+    reserved = b'\x00' * 2
 
     entry_bytes += signature
-    entry_bytes += struct.pack("<B 3s", sig_len, reserved)
+    entry_bytes += struct.pack("<H 2s", sig_len, reserved)
 
-    # CRC32 over bytes 0-127
-    assert len(entry_bytes) == AUDIT_ENTRY_SIZE - 4  # 128 bytes before CRC
+    # CRC32 over bytes 0-311
+    assert len(entry_bytes) == AUDIT_ENTRY_SIZE - 4  # 312 bytes before CRC
     crc = zlib.crc32(entry_bytes) & 0xFFFFFFFF
     entry_bytes += struct.pack("<I", crc)
 
@@ -120,10 +120,10 @@ def _build_entry(event_type=1, event_result=0, detail_code=0, sequence_num=0,
 
 
 def _verify_crc(entry_bytes):
-    """Verify CRC32 of an entry (bytes 0-127 vs stored crc32 at 128-131)."""
+    """Verify CRC32 of an entry (bytes 0-311 vs stored crc32 at 312-315)."""
     assert len(entry_bytes) == AUDIT_ENTRY_SIZE
-    stored_crc = struct.unpack_from("<I", entry_bytes, 128)[0]
-    computed_crc = zlib.crc32(entry_bytes[:128]) & 0xFFFFFFFF
+    stored_crc = struct.unpack_from("<I", entry_bytes, AUDIT_ENTRY_SIZE - 4)[0]
+    computed_crc = zlib.crc32(entry_bytes[:AUDIT_ENTRY_SIZE - 4]) & 0xFFFFFFFF
     return stored_crc == computed_crc
 
 
@@ -149,7 +149,7 @@ def _build_log_file(tmp_path, num_entries=3, event_type=1):
 def _sign_log_file(log_path, public_key):
     """Sign a log file using RSA public key encryption (the audited reference Section 8 model).
 
-    FC encrypts SHA-256 hash with public key. Returns 384-byte ciphertext.
+    FC encrypts SHA-256 hash with public key. Returns 256-byte ciphertext.
     """
     log_data = log_path.read_bytes()
     sha256_hash = hashlib.sha256(log_data).digest()
@@ -191,12 +191,12 @@ class TestLOG001EntryFormat:
     """Test binary audit log entry format."""
 
     def test_LOG001_entry_size(self):
-        """Entry must be exactly 132 bytes."""
+        """Entry must be exactly 316 bytes."""
         entry = _build_entry()
         assert len(entry) == AUDIT_ENTRY_SIZE
 
     def test_LOG001_struct_pack_size(self):
-        """Struct format must produce 132 bytes."""
+        """Struct format must produce 316 bytes."""
         assert struct.calcsize(ENTRY_STRUCT_FORMAT) == AUDIT_ENTRY_SIZE
 
     def test_LOG001_magic_bytes(self):
@@ -234,7 +234,7 @@ class TestLOG001EntryFormat:
     def test_LOG001_signature_field_zeroed(self):
         """In per-file mode, signature field must be all zeroes."""
         entry = _build_entry()
-        sig = entry[52:124]
+        sig = entry[52:52 + AUDIT_SIG_MAX_LEN]
         assert sig == b'\x00' * AUDIT_SIG_MAX_LEN
 
     def test_LOG001_sig_len_zero(self):
@@ -263,8 +263,8 @@ class TestLOG001CRC:
     def test_LOG001_crc_covers_all_fields(self):
         """CRC must cover bytes 0-127 (everything except itself)."""
         entry = _build_entry()
-        stored_crc = struct.unpack_from("<I", entry, 128)[0]
-        computed_crc = zlib.crc32(entry[:128]) & 0xFFFFFFFF
+        stored_crc = struct.unpack_from("<I", entry, AUDIT_ENTRY_SIZE - 4)[0]
+        computed_crc = zlib.crc32(entry[:AUDIT_ENTRY_SIZE - 4]) & 0xFFFFFFFF
         assert stored_crc == computed_crc
 
     def test_LOG001_crc_detects_tamper_in_detail(self):
@@ -278,17 +278,17 @@ class TestLOG001CRC:
 # ── Tests: Per-File RSA Signing (the audited reference Section 8) ─────────────────────────────
 
 class TestLOG001PerFileRSA:
-    """Test per-file RSA-3072 log signing.
+    """Test per-file RSA-2048 log signing.
 
     the audited reference Section 8 model:
     - FC computes SHA-256 of audit_log.bin
     - Encrypts hash with RSA public key (on FC)
-    - Stores 384-byte ciphertext as audit_log.sig
+    - Stores 256-byte ciphertext as audit_log.sig
     - Manufacturer decrypts with private key (offline) and compares hashes
     """
 
     def test_LOG001_sig_file_size(self, rsa_keypair, tmp_path):
-        """Signature file must be exactly 384 bytes (RSA-3072)."""
+        """Signature file must be exactly 256 bytes (RSA-2048)."""
         log_path, _ = _build_log_file(tmp_path)
         sig = _sign_log_file(log_path, rsa_keypair["public_key"])
         assert len(sig) == RSA_SIG_SIZE
@@ -342,7 +342,7 @@ class TestLOG001PerFileRSA:
         # Generate a different RSA keypair
         other_private = rsa.generate_private_key(
             public_exponent=65537,
-            key_size=3072,
+            key_size=2048,
         )
 
         assert not _verify_log_signature(log_path, sig_path, other_private)

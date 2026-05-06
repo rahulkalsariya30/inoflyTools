@@ -25,10 +25,10 @@ WHAT IT EXPECTS
 A raw flash image (.bin produced by `arm-none-eabi-objcopy -O binary`) of the
 CubeOrange+ app firmware, where:
   - Byte 0 of the .bin == address APP_LOAD_ADDRESS in flash (0x08020000).
-  - Offset BOOT_DELAY_ADDRESS+8 (0x1a8) holds image_toc_start_t followed by
+  - Offset BOOT_DELAY_ADDRESS+8 (0x2a8) holds image_toc_start_t followed by
     image_toc_entry_t records and a TOC_END_MAGIC sentinel.
   - The TOC's entry[0] is the BOOT region (signed range), entry[1] is the
-    SIG region (a 384-byte zero-filled placeholder reserved by script.ld).
+    SIG region (a 256-byte zero-filled placeholder reserved by script.ld).
 
 Layout constants and struct field offsets are defined to match
 src/include/image_toc.h in the PX4 fork. Keep these in sync if the C struct
@@ -61,16 +61,20 @@ TOC_ENTRY_FMT = "<4sIII4BI"  # name, start, end, target, sigidx, sigkey, enckey,
 # Per CubeOrange+ hw_config.h. If you ever port to another STM32H7 board with a
 # different APP_LOAD_ADDRESS, pass --app-load-address on the CLI.
 APP_LOAD_ADDRESS_DEFAULT = 0x08020000
-BOOT_DELAY_ADDRESS_DEFAULT = 0x000001A0
-TOC_OFFSET_DEFAULT = BOOT_DELAY_ADDRESS_DEFAULT + 8  # 0x1A8
+# BOOT_DELAY_ADDRESS is 0x2A0 (not the documented 0x1A0) on STM32H7: the M7's
+# vector table is 16 system + ~150 IRQ entries × 4 = ~0x298 bytes, so the
+# bootdelay slot lands at 0x2A0 after ALIGN(32) and the TOC sits 8 bytes
+# later. Matches BOOT_DELAY_ADDRESS in the cubeorangeplus hw_config.h.
+BOOT_DELAY_ADDRESS_DEFAULT = 0x000002A0
+TOC_OFFSET_DEFAULT = BOOT_DELAY_ADDRESS_DEFAULT + 8  # 0x2A8
 
-# RSA-3072 PSS produces a 384-byte signature. Salt length = 32 bytes (SHA-256
+# RSA-2048 PSS produces a 256-byte signature. Salt length = 32 bytes (SHA-256
 # digest length) — matches what libtomcrypt's rsa_verify_hash_ex expects in
 # the bootloader (see crypto.c in the PX4 fork). Do NOT use PSS.MAX_LENGTH
 # here; that is what signer.py uses for the JSON bundle, and a saltlen
 # mismatch silently fails verification on the device.
 RSA_PSS_SALT_LEN = 32
-RSA_3072_SIG_LEN = 384
+RSA_2048_SIG_LEN = 256
 
 
 class TocParseError(RuntimeError):
@@ -144,7 +148,7 @@ def sign_image(
       3. RSA-PSS sign with saltlen=32. (Must match the verifier.)
       4. Patch the signature into the SIG region's offset in the .bin.
 
-    The signature region in the unsigned build is 384 zero bytes reserved by
+    The signature region in the unsigned build is 256 zero bytes reserved by
     the linker — patching does not change file size.
     """
     _entry_count, entries = find_toc(bin_data, toc_offset)
@@ -174,9 +178,9 @@ def sign_image(
             f"SIG region [{sig_off_lo:#x}..{sig_off_hi:#x}] does not follow BOOT region or extends past .bin"
         )
     sig_region_len = sig_off_hi - sig_off_lo
-    if sig_region_len != RSA_3072_SIG_LEN:
+    if sig_region_len != RSA_2048_SIG_LEN:
         raise TocParseError(
-            f"SIG region is {sig_region_len} bytes but RSA-3072 PSS signature is exactly {RSA_3072_SIG_LEN}"
+            f"SIG region is {sig_region_len} bytes but RSA-2048 PSS signature is exactly {RSA_2048_SIG_LEN}"
         )
 
     # The signer must NOT include the placeholder bytes in the hashed range, or
@@ -199,9 +203,9 @@ def sign_image(
         ),
         hashes.SHA256(),
     )
-    if len(signature) != RSA_3072_SIG_LEN:
+    if len(signature) != RSA_2048_SIG_LEN:
         raise RuntimeError(
-            f"Expected {RSA_3072_SIG_LEN}-byte signature, got {len(signature)} — wrong key size?"
+            f"Expected {RSA_2048_SIG_LEN}-byte signature, got {len(signature)} — wrong key size?"
         )
 
     signed = bytearray(bin_data)
@@ -262,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         "--key",
         type=Path,
         default=Path(__file__).resolve().parents[2] / "pki" / "manufacturer" / "private" / "manufacturer_private.pem",
-        help="RSA-3072 manufacturer private key (PEM)",
+        help="RSA-2048 manufacturer private key (PEM)",
     )
     parser.add_argument(
         "--public-key",

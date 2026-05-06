@@ -51,10 +51,10 @@ class TestROT001_KeypairGeneration:
         public_key = serialization.load_pem_public_key(public_key_pem)
         assert isinstance(public_key, rsa.RSAPublicKey)
 
-    def test_ROT001_uses_RSA_3072(self):
+    def test_ROT001_uses_RSA_2048(self):
         """
-        Keypair must use RSA-3072 (128-bit security).
-        WHY: RSA-3072 is NIST-recommended for use beyond 2030 (SP 800-57).
+        Keypair must use RSA-2048 (112-bit security).
+        WHY: NIST SP 800-57 R5 accepts RSA-2048 for new signatures through 2030.
              Supports both signing (firmware) and encryption (log hashes).
         """
         private_key_pem, public_key_pem = generate_keypair()
@@ -147,8 +147,8 @@ class TestROT001_KeypairGeneration:
                 hashes.SHA256(),
             )
 
-    def test_ROT001_rsa_signature_is_384_bytes(self):
-        """RSA-3072 signature must be exactly 384 bytes (3072/8)."""
+    def test_ROT001_rsa_signature_is_256_bytes(self):
+        """RSA-2048 signature must be exactly 256 bytes (2048/8)."""
         private_key_pem, _ = generate_keypair()
         private_key = serialization.load_pem_private_key(private_key_pem, password=None)
 
@@ -160,4 +160,4 @@ class TestROT001_KeypairGeneration:
             ),
             hashes.SHA256(),
         )
-        assert len(signature) == RSA_KEY_SIZE // 8  # 3072/8 = 384
+        assert len(signature) == RSA_KEY_SIZE // 8  # 2048/8 = 256

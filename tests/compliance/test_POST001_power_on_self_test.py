@@ -112,7 +112,7 @@ def firmware_file(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def binary_manifest(firmware_file, keypair):
-    """A valid 501-byte binary manifest."""
+    """A valid 373-byte binary manifest."""
     priv_path, _ = keypair
     manifest = generate_manifest(firmware_file, firmware_version="1.14.0")
     signed = sign_manifest(manifest, private_key_path=priv_path)
@@ -126,30 +126,30 @@ class TestPOST001ManifestFormat:
     expects (security_manifest.h struct layout)."""
 
     def test_POST001_manifest_size_matches_struct(self, binary_manifest):
-        """Binary manifest must be exactly 501 bytes (sizeof(security_manifest_t))."""
+        """Binary manifest must be exactly 373 bytes (sizeof(security_manifest_t))."""
         assert len(binary_manifest) == TOTAL_SIZE
-        assert len(binary_manifest) == 501
+        assert len(binary_manifest) == 373
 
     def test_POST001_magic_bytes(self, binary_manifest):
-        """First 8 bytes must be 'INOFLY02' magic."""
+        """First 8 bytes must be 'INOFLY03' magic."""
         assert binary_manifest[0:8] == MAGIC
 
     def test_POST001_format_version(self, binary_manifest):
-        """Byte 8 must be format version 2 (RSA-3072)."""
+        """Byte 8 must be format version 3 (RSA-2048)."""
         assert binary_manifest[8] == FORMAT_VERSION
-        assert binary_manifest[8] == 2
+        assert binary_manifest[8] == 3
 
-    def test_POST001_signature_is_384_bytes(self, binary_manifest):
-        """RSA-3072 signature must be exactly 384 bytes."""
-        sig_len_bytes = binary_manifest[457:459]
+    def test_POST001_signature_is_256_bytes(self, binary_manifest):
+        """RSA-2048 signature must be exactly 256 bytes."""
+        sig_len_bytes = binary_manifest[329:331]
         sig_len = struct.unpack("<H", sig_len_bytes)[0]
         assert sig_len == SIG_MAX_LEN
-        assert sig_len == 384
+        assert sig_len == 256
 
     def test_POST001_crc32_is_last_4_bytes(self, binary_manifest):
         """CRC32 must be stored in the last 4 bytes."""
-        stored_crc = struct.unpack("<I", binary_manifest[497:501])[0]
-        computed_crc = _compute_crc32(binary_manifest[:497])
+        stored_crc = struct.unpack("<I", binary_manifest[369:373])[0]
+        computed_crc = _compute_crc32(binary_manifest[:369])
         assert stored_crc == computed_crc
 
     def test_POST001_signable_payload_is_98_bytes(self, binary_manifest):
@@ -157,8 +157,8 @@ class TestPOST001ManifestFormat:
         must be exactly 98 bytes — matching _build_signable_payload in C++."""
         code_hash = binary_manifest[9:9+32]
         data_hash = binary_manifest[41:41+32]
-        board_id = struct.unpack("<H", binary_manifest[459:461])[0]
-        version = binary_manifest[461:461+32]
+        board_id = struct.unpack("<H", binary_manifest[331:333])[0]
+        version = binary_manifest[333:333+32]
 
         payload = code_hash + data_hash + struct.pack("<H", board_id) + version
         assert len(payload) == 98
@@ -182,11 +182,11 @@ class TestPOST001CRC:
         assert verify_binary_manifest(bytes(data), pub_path) is False
 
     def test_POST001_crc_covers_entire_manifest(self, binary_manifest):
-        """CRC must cover bytes 0-496 (everything except the CRC itself)."""
-        stored_crc = struct.unpack("<I", binary_manifest[497:501])[0]
+        """CRC must cover bytes 0-368 (everything except the CRC itself)."""
+        stored_crc = struct.unpack("<I", binary_manifest[369:373])[0]
         # Verify by recomputing
         import zlib as _zlib
-        expected_crc = _zlib.crc32(binary_manifest[:497]) & 0xFFFFFFFF
+        expected_crc = _zlib.crc32(binary_manifest[:369]) & 0xFFFFFFFF
         assert stored_crc == expected_crc
 
 
@@ -216,8 +216,8 @@ class TestPOST001SignatureVerification:
         data[10] ^= 0xFF
         # Recompute CRC so CRC check passes
         import zlib as _zlib
-        new_crc = _zlib.crc32(bytes(data[:497])) & 0xFFFFFFFF
-        struct.pack_into("<I", data, 497, new_crc)
+        new_crc = _zlib.crc32(bytes(data[:369])) & 0xFFFFFFFF
+        struct.pack_into("<I", data, 369, new_crc)
         assert verify_binary_manifest(bytes(data), pub_path) is False
 
 
@@ -291,7 +291,13 @@ class TestPOST001FirmwareSource:
         if content is None:
             pytest.skip("WSL/PX4 not available")
         assert "verifySignature" in content
-        assert "RSA_PKCS1_PSS_PADDING" in content or "MBEDTLS_RSA_PKCS_V21" in content
+        # POSIX uses OpenSSL RSA_PKCS1_PSS_PADDING; NuttX uses libtomcrypt
+        # rsa_verify_hash_ex with LTC_PKCS_1_PSS. Either is acceptable.
+        assert (
+            "RSA_PKCS1_PSS_PADDING" in content
+            or "LTC_PKCS_1_PSS" in content
+            or "rsa_verify_hash_ex" in content
+        )
 
     def test_POST001_checker_uses_openssl_for_sitl(self):
         """SITL path must use OpenSSL for crypto."""
@@ -302,14 +308,14 @@ class TestPOST001FirmwareSource:
             pytest.skip("WSL/PX4 not available")
         assert "#include <openssl/" in content
 
-    def test_POST001_checker_uses_mbedtls_for_nuttx(self):
-        """NuttX path must use mbedTLS for crypto."""
+    def test_POST001_checker_uses_libtomcrypt_for_nuttx(self):
+        """NuttX path must use libtomcrypt for crypto (no mbedTLS in this project)."""
         content = wsl_read_file(
             "~/PX4-Autopilot/src/modules/secure_boot/FirmwareIntegrityChecker.cpp"
         )
         if content is None:
             pytest.skip("WSL/PX4 not available")
-        assert "#include <mbedtls/" in content
+        assert "tomcrypt" in content or "rsa_verify_hash_ex" in content
 
     def test_POST001_uorb_message_exists(self):
         """FirmwareIntegrityStatus.msg uORB message definition must exist."""

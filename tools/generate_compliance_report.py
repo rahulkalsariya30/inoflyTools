@@ -48,11 +48,11 @@ class Requirement:
 REQUIREMENTS = {
     "ROT001": Requirement(
         req_id="ROT001",
-        description="Manufacturer RSA-3072 keypair generation",
+        description="Manufacturer RSA-2048 keypair generation",
         dgca_clause="Root of Trust (Manufacturer)",
         status="done",
         implementation=[
-            "tools/pki/keygen.py — generates RSA-3072 keypair",
+            "tools/pki/keygen.py — generates RSA-2048 keypair",
             "pki/manufacturer/private/ — private key (NEVER committed)",
             "pki/manufacturer/public/ — public key",
         ],
@@ -65,7 +65,7 @@ REQUIREMENTS = {
         implementation=[
             "tools/pki/embed_pubkey.py — PEM to DER to C header",
             "firmware/include/manufacturer_pubkey.h — compiled into firmware",
-            "DER SubjectPublicKeyInfo format, ~422 bytes for RSA-3072",
+            "DER SubjectPublicKeyInfo format, ~294 bytes for RSA-2048",
         ],
     ),
     "CHK001": Requirement(
@@ -81,13 +81,13 @@ REQUIREMENTS = {
     ),
     "SIG001": Requirement(
         req_id="SIG001",
-        description="Manifest signed with manufacturer RSA-3072 key",
+        description="Manifest signed with manufacturer RSA-2048 key",
         dgca_clause="Signing (Section 7.1)",
         status="done",
         implementation=[
             "tools/signer/signer.py — RSA-PSS signing of canonical manifest",
             "SHA-256 hash + MGF1-SHA256 padding",
-            "Signature is 384 bytes (3072/8)",
+            "Signature is 256 bytes (2048/8)",
         ],
     ),
     "PKG001": Requirement(
@@ -190,8 +190,8 @@ REQUIREMENTS = {
         implementation=[
             "src/modules/secure_boot/SecurityAuditLogger.hpp/.cpp",
             "132-byte binary entries with CRC32 integrity",
-            "Per-file RSA-3072: SHA-256 of audit_log.bin encrypted with public key",
-            "audit_log.sig (384 bytes) verified offline with manufacturer private key",
+            "Per-file RSA-2048: SHA-256 of audit_log.bin encrypted with public key",
+            "audit_log.sig (256 bytes) verified offline with manufacturer private key",
             "Events: POST result, firmware update, arming block, param violation",
         ],
     ),
@@ -503,11 +503,11 @@ def generate_text_report(matrix: list, summary: dict, output_path: Path):
     w("CRYPTOGRAPHIC STANDARDS")
     w("=" * 78)
     w("")
-    w("  Signing:        RSA-3072 / RSA-PSS (SHA-256, MGF1-SHA256)")
+    w("  Signing:        RSA-2048 / RSA-PSS (SHA-256, MGF1-SHA256)")
     w("  Hash:           SHA-256 (NIST FIPS 180-4)")
-    w("  Key size:       3072-bit RSA (128-bit security, NIST SP 800-57)")
-    w("  Signature size: 384 bytes")
-    w("  Log signing:    RSA-3072 public key encryption (PKCS#1 v1.5)")
+    w("  Key size:       2048-bit RSA (112-bit security, NIST SP 800-57 R5)")
+    w("  Signature size: 256 bytes")
+    w("  Log signing:    RSA-2048 public key encryption (PKCS#1 v1.5)")
     w("  CRC:            CRC32 (corruption detection for binary manifest/audit entries)")
     w("  SITL crypto:    OpenSSL")
     w("  HW crypto:      mbedTLS (lightweight, designed for STM32)")

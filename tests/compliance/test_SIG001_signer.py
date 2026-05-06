@@ -9,7 +9,7 @@ Requirement: SIG001
   - A tampered manifest must fail verification
   - A signature from a different key must fail verification
   - Signed bundle must contain the manifest and signature fields
-  - Signature must use RSA-3072 with PSS padding and SHA-256
+  - Signature must use RSA-2048 with PSS padding and SHA-256
 """
 
 import base64
@@ -100,8 +100,8 @@ class TestSIG001_Signing:
         except Exception:
             pytest.fail("Signature is not valid base64")
 
-    def test_SIG001_signature_is_384_bytes(self, signed_bundle):
-        """RSA-3072 signature must be exactly 384 bytes (3072 / 8)."""
+    def test_SIG001_signature_is_256_bytes(self, signed_bundle):
+        """RSA-2048 signature must be exactly 256 bytes (2048 / 8)."""
         sig_bytes = base64.b64decode(signed_bundle["signature"])
         assert len(sig_bytes) == RSA_KEY_SIZE // 8, \
             f"Expected {RSA_KEY_SIZE // 8} bytes, got {len(sig_bytes)}"
@@ -171,7 +171,7 @@ class TestSIG001_Verification:
     def test_SIG001_corrupted_signature_fails_verification(self, signed_bundle, keypair):
         """A randomly corrupted signature must not verify."""
         corrupted = json.loads(json.dumps(signed_bundle))
-        corrupted["signature"] = base64.b64encode(b"\x00" * 384).decode("utf-8")
+        corrupted["signature"] = base64.b64encode(b"\x00" * 256).decode("utf-8")
         result = verify_bundle(corrupted, public_key_path=keypair["public"])
         assert result is False
 

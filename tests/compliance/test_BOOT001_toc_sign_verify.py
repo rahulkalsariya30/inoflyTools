@@ -32,7 +32,7 @@ from tools.signer.toc_sign import (
     TOC_END_MAGIC,
     TOC_OFFSET_DEFAULT,
     APP_LOAD_ADDRESS_DEFAULT,
-    RSA_3072_SIG_LEN,
+    RSA_2048_SIG_LEN,
 )
 from tools.pki.keygen import generate_keypair
 
@@ -43,14 +43,14 @@ from tools.pki.keygen import generate_keypair
 
 @pytest.fixture(scope="module")
 def keypair():
-    """RSA-3072 keypair. Module-scoped because keygen is ~1s."""
+    """RSA-2048 keypair. Module-scoped because keygen is ~1s."""
     priv_pem, pub_pem = generate_keypair()
     return priv_pem, pub_pem
 
 
 @pytest.fixture(scope="module")
 def other_keypair():
-    """A second, unrelated RSA-3072 keypair — used for negative cross-key tests."""
+    """A second, unrelated RSA-2048 keypair — used for negative cross-key tests."""
     priv_pem, pub_pem = generate_keypair()
     return priv_pem, pub_pem
 
@@ -66,15 +66,15 @@ def _build_synthetic_bin(
       [0 .. toc_offset)            arbitrary "vectors + boot delay" bytes
       [toc_offset .. toc_end)      image_toc_start_t + 2 entries + END magic
       [toc_end .. code_size)       arbitrary "code" bytes
-      [code_size .. code_size+384) 384 zero bytes (SIG placeholder)
+      [code_size .. code_size+256) 256 zero bytes (SIG placeholder)
 
     BOOT spans [app_load_address, app_load_address+code_size); SIG spans the
-    384 bytes after that. Total .bin length = code_size + 384.
+    256 bytes after that. Total .bin length = code_size + 256.
     """
     assert code_size > toc_offset + 8 + 24 + 24 + 4, "code_size must be larger than the TOC itself"
 
     sig_off = code_size
-    total_len = code_size + RSA_3072_SIG_LEN
+    total_len = code_size + RSA_2048_SIG_LEN
 
     bin_data = bytearray(total_len)
 
@@ -107,7 +107,7 @@ def _build_synthetic_bin(
         toc_offset + 8 + 24,
         b"SIG1",
         app_load_address + code_size,
-        app_load_address + code_size + RSA_3072_SIG_LEN,
+        app_load_address + code_size + RSA_2048_SIG_LEN,
         0,
         0,
         0,
@@ -122,7 +122,7 @@ def _build_synthetic_bin(
     for i in range(toc_offset + 8 + 24 + 24 + 4, code_size):
         bin_data[i] = (i * 13 + 0x99) & 0xFF
 
-    # SIG region [code_size .. code_size+384) is left zero — that's the linker placeholder.
+    # SIG region [code_size .. code_size+256) is left zero — that's the linker placeholder.
     return bytes(bin_data)
 
 
@@ -177,24 +177,24 @@ def test_BOOT001_signed_bin_same_length(synthetic_bin, keypair):
 
 
 def test_BOOT001_signature_region_overwritten(synthetic_bin, keypair):
-    """The 384 placeholder zero bytes must be replaced with non-zero signature bytes."""
+    """The 256 placeholder zero bytes must be replaced with non-zero signature bytes."""
     priv, _pub = keypair
     signed = sign_image(synthetic_bin, priv)
-    # SIG region is the last 384 bytes of our synthetic bin.
-    sig_bytes = signed[-RSA_3072_SIG_LEN:]
-    assert len(sig_bytes) == RSA_3072_SIG_LEN
+    # SIG region is the last 256 bytes of our synthetic bin.
+    sig_bytes = signed[-RSA_2048_SIG_LEN:]
+    assert len(sig_bytes) == RSA_2048_SIG_LEN
     assert any(b != 0 for b in sig_bytes), "signature region was not patched"
     # And the BOOT region must be byte-for-byte unchanged.
-    boot_len = len(synthetic_bin) - RSA_3072_SIG_LEN
+    boot_len = len(synthetic_bin) - RSA_2048_SIG_LEN
     assert signed[:boot_len] == synthetic_bin[:boot_len]
 
 
-def test_BOOT001_signature_is_exactly_384_bytes(synthetic_bin, keypair):
-    """RSA-3072 PSS signature length is fixed at |n|/8 = 384."""
+def test_BOOT001_signature_is_exactly_256_bytes(synthetic_bin, keypair):
+    """RSA-2048 PSS signature length is fixed at |n|/8 = 256."""
     priv, _pub = keypair
     signed = sign_image(synthetic_bin, priv)
-    sig_bytes = signed[-RSA_3072_SIG_LEN:]
-    assert len(sig_bytes) == 384
+    sig_bytes = signed[-RSA_2048_SIG_LEN:]
+    assert len(sig_bytes) == 256
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +207,7 @@ def test_BOOT001_boot_region_tamper_fails_verify(synthetic_bin, keypair):
     signed = sign_image(synthetic_bin, priv)
     tampered = bytearray(signed)
     # Flip a byte well inside BOOT (past the TOC) — at offset code_size//2.
-    boot_len = len(signed) - RSA_3072_SIG_LEN
+    boot_len = len(signed) - RSA_2048_SIG_LEN
     tampered[boot_len // 2] ^= 0xFF
     assert verify_image(bytes(tampered), pub) is False
 
@@ -250,9 +250,9 @@ def test_BOOT001_signer_uses_saltlen_32(synthetic_bin, keypair):
     priv, pub = keypair
     signed = sign_image(synthetic_bin, priv)
 
-    boot_len = len(signed) - RSA_3072_SIG_LEN
+    boot_len = len(signed) - RSA_2048_SIG_LEN
     boot_bytes = signed[:boot_len]
-    sig_bytes = signed[-RSA_3072_SIG_LEN:]
+    sig_bytes = signed[-RSA_2048_SIG_LEN:]
 
     public_key = serialization.load_pem_public_key(pub)
     # MAX_LENGTH would silently pass anything <= max, so this asymmetric check
