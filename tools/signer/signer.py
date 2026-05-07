@@ -22,7 +22,7 @@ WHAT gets signed?
 WHY RSA-PSS (not PKCS#1 v1.5)?
   - PSS is the modern, provably-secure RSA signature scheme
   - Recommended by NIST SP 800-131A for new applications
-  - OpenSSL and mbedTLS both support RSA-PSS natively
+  - OpenSSL (host) and libtomcrypt (NuttX device) both support RSA-PSS natively
 
 SIGNED BUNDLE FORMAT (what gets stored on the drone):
   {

@@ -132,7 +132,7 @@ REQUIREMENTS = {
         implementation=[
             "Requires NuttX linker symbols (_stext/_etext) for flash addresses",
             "SITL: stubbed (returns true) — not meaningful in simulation",
-            "Target: OrangeCube / Pixhawk hardware with mbedTLS",
+            "Target: OrangeCube / Pixhawk hardware with libtomcrypt (already linked into PX4 NuttX)",
         ],
     ),
     "POST003": Requirement(
@@ -510,7 +510,7 @@ def generate_text_report(matrix: list, summary: dict, output_path: Path):
     w("  Log signing:    RSA-2048 public key encryption (PKCS#1 v1.5)")
     w("  CRC:            CRC32 (corruption detection for binary manifest/audit entries)")
     w("  SITL crypto:    OpenSSL")
-    w("  HW crypto:      mbedTLS (lightweight, designed for STM32)")
+    w("  HW crypto:      libtomcrypt (already linked into PX4 NuttX; sized for STM32)")
 
     # Gap summary
     w("")

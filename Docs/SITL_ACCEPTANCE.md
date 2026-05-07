@@ -98,7 +98,7 @@ exact pass criterion.
   [qgroundcontrol/custom/src/AuditLogController.cpp](../qgroundcontrol/custom/src/AuditLogController.cpp)
   (auto-FTP backfill).
 
-## 10. Audit log — offline RSA-3072 signature verification
+## 10. Audit log — offline RSA-2048 signature verification
 
 - **Covers:** LOG001 manufacturer-side verification
 - **Action:** download `audit_log.bin` and `audit_log.sig` via QGC

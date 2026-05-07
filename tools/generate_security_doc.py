@@ -276,7 +276,7 @@ def build():
         ("POST001", "Drone must verify firmware integrity on every boot (Power On Self Test)",
          "secure_boot module runs at boot: CRC32 integrity check, then RSA-PSS signature verification. Publishes result via uORB message bus.", "done"),
         ("POST002", "POST must verify actual firmware code in memory (hardware)",
-         "Requires NuttX linker symbols for flash addresses. SITL returns pass stub. Target: OrangeCube/Pixhawk with mbedTLS.", "todo"),
+         "Requires NuttX linker symbols for flash addresses. SITL returns pass stub. Target: OrangeCube/Pixhawk with libtomcrypt.", "todo"),
         ("POST003", "POST must verify actual firmware data in memory (hardware)",
          "Requires knowledge of PX4 parameter storage address on target hardware. SITL returns pass stub.", "todo"),
         ("POST004", "POST must verify the board ID matches the expected hardware",
@@ -333,7 +333,7 @@ def build():
          "pairing via MAVLink signing (per-drone key provisioning)."),
         ("Phase 5 — Hardware Deployment", "⏳  Planned",
          "Deploy to OrangeCube/Pixhawk hardware: public key in CRP-protected flash, real "
-         "code and data hash verification using mbedTLS on NuttX, board ID verification, "
+         "code and data hash verification using libtomcrypt on NuttX, board ID verification, "
          "and hardware-specific testing."),
         ("Phase 6 — Compliance Test Suite & Report", "⏳  In Progress",
          "Full automated test suite with 260+ tests mapped to DGCA requirements. "

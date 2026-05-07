@@ -95,7 +95,7 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | **Impact** | Full drone control — arbitrary code execution on flight controller |
 | **Likelihood** | Medium (requires physical access or compromised update channel) |
 | **Mitigations** | CHK001 (SHA-256 checksums), SIG001 (RSA-PSS signed manifest), POST001 (boot-time verification), ARM001 (arming blocked on mismatch) |
-| **Residual risk** | Low — attacker must also forge the manufacturer's RSA-3072 signature |
+| **Residual risk** | Low — attacker must also forge the manufacturer's RSA-2048 signature |
 
 ### T2 — Manifest tampering
 
@@ -111,7 +111,7 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 
 | Field | Value |
 |-------|-------|
-| **Attack** | Attacker obtains the manufacturer RSA-3072 private key |
+| **Attack** | Attacker obtains the manufacturer RSA-2048 private key |
 | **Impact** | Critical — can sign arbitrary firmware that passes all verification |
 | **Likelihood** | Low (key stored in TPM/HSM in production; file-based only during development) |
 | **Mitigations** | ROT001 (key generated in TPM/HSM for production), Phase 4.1 (hardware-bound key), key never transmitted over network |
@@ -191,7 +191,7 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 
 | Field | Value |
 |-------|-------|
-| **Attack** | Attacker uses DFU or SWD to overwrite our bootloader with one that returns "signature OK" without actually verifying. The replaced bootloader then launches arbitrary firmware. ⚠️ **AMENDED 2026-05-04 (ADR-013/015):** under the bootstrap-trust model, sector 0 is also writable via PX4's `bl_update` mechanism — but `bl_update` runs *inside* a running app fw, and the running app fw is signature-verified by the existing bootloader (BOOT001). So `bl_update` is only weaponizable by an attacker who already holds the manufacturer's RSA-3072 private key (covered by T3). |
+| **Attack** | Attacker uses DFU or SWD to overwrite our bootloader with one that returns "signature OK" without actually verifying. The replaced bootloader then launches arbitrary firmware. ⚠️ **AMENDED 2026-05-04 (ADR-013/015):** under the bootstrap-trust model, sector 0 is also writable via PX4's `bl_update` mechanism — but `bl_update` runs *inside* a running app fw, and the running app fw is signature-verified by the existing bootloader (BOOT001). So `bl_update` is only weaponizable by an attacker who already holds the manufacturer's RSA-2048 private key (covered by T3). |
 | **Impact** | Bypasses the entire chain of trust — every downstream check (firmware sig, manifest sig, POST, ARM gate) is performed by attacker-controlled code. |
 | **Likelihood** | ~~High pre-RDP (DFU and SWD both writable); requires physical port access.~~ ⚠️ **AMENDED 2026-05-04:** ✅ **Low** for the USB-only attacker class — DFU is software-refused (BOOT005); `bl_update` requires a manufacturer-signed app fw (BOOT006). **High** for a physical attacker who reaches SWD/JTAG by breaking the airframe + Cube seal (out of scope at the crypto layer; compensated procedurally — see Section 6 and T11 mitigation row). |
 | **Mitigations** | ~~BOOT003 (RDP Level 2 disables DFU writes AND SWD/JTAG writes at the chip level — no remaining external write path to the bootloader region). The bootloader's trust anchor (manufacturer pubkey) lives in OTP, not in the bootloader binary, so even a copied bootloader cannot substitute its own key.~~ ⚠️ **AMENDED 2026-05-04 (ADR-013/014/015):** ✅ **Three-part compensating control replaces RDP L2:** (a) **BOOT005 software DFU-refuse** — production bootloader actively refuses DFU mode entry, closing the DFU path. (b) **BOOT006 bootstrap-trust** — sector 0 writes via `bl_update` require a manufacturer-signed app fw containing the new bootloader in ROMFS; an attacker without the manufacturer's private key cannot push a malicious bootloader. (c) **BOOT007 tamper-evident seal** — physical SWD/JTAG access requires visibly breaking the airframe + Cube seal, triggering RMA quarantine on receipt. The bootloader's trust anchor (manufacturer pubkey) is now embedded in the bootloader binary itself; an attacker who could rewrite sector 0 could substitute a key — but every remaining write path is closed by (a)–(c) above. |
@@ -216,7 +216,7 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | **Attack** | Attacker attempts to substitute the manufacturer pubkey embedded in the bootloader binary with their own pubkey, then signs malicious firmware with the matching private key. The substitution requires writing sector 0 (where the bootloader lives). |
 | **Impact** | Would defeat the entire root of trust — modified bootloader would happily verify attacker-signed firmware. |
 | **Likelihood** | **Low** for the USB-only attacker class — every external write path to sector 0 is closed: DFU is software-refused (BOOT005), `bl_update` requires a manufacturer-signed app fw (BOOT006). **High** for a physical attacker who breaks the seal to reach SWD/JTAG (out of scope at the crypto layer — see Section 6). |
-| **Mitigations** | **BOOT005 (software DFU-refuse)** + **BOOT006 (bootstrap-trust via `bl_update`)** + **BOOT007 (tamper-evident seal on SWD path)**. Same compensating-control bundle as T11. The `bl_update` path is the only unprivileged route to sector 0, and it is gated by signature verification of the running app fw containing the new bootloader image — an attacker would need the manufacturer's RSA-3072 private key to weaponize it (collapsed into T3). |
+| **Mitigations** | **BOOT005 (software DFU-refuse)** + **BOOT006 (bootstrap-trust via `bl_update`)** + **BOOT007 (tamper-evident seal on SWD path)**. Same compensating-control bundle as T11. The `bl_update` path is the only unprivileged route to sector 0, and it is gated by signature verification of the running app fw containing the new bootloader image — an attacker would need the manufacturer's RSA-2048 private key to weaponize it (collapsed into T3). |
 | **Residual risk** | LOW on sealed production units at the crypto layer. Acknowledged residuals: (a) physical attacker breaking the seal — handled procedurally via RMA inspection + UID/seal-serial tracking (Section 6); (b) chip decap + physical rewriting of internal flash — outside DGCA Level 1 scope, nation-state-actor territory. ⚠️ **Note on hardware-enforced strength:** the original T12 had a hardware-enforced "fails closed" property (write-once OTP fuses). T12' does not — internal flash *can* be erased and rewritten if an attacker reaches sector 0. The end property "the bootloader on a deployed unit is the bootloader the manufacturer intended" is preserved by the seal + bootstrap-trust combination; the crypto-layer guarantee is replaced by an operational guarantee, which is the standard pattern at this hardware tier (and is what ArduPilot ships with). |
 
 ### T13 — Debugger-based runtime verification skip
@@ -447,7 +447,7 @@ On every power-on or reset of a Phase-5b-ready CubeOrange+:
    to OTP is via memory-mapped I/O, internal to the chip — no
    external path can intercept or modify this read.~~
    ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **Bootloader uses its
-   embedded RSA-3072 public key** — a constant data symbol compiled
+   embedded RSA-2048 public key** — a constant data symbol compiled
    into the bootloader binary at build time, sourced from
    `pki/manufacturer/public/manufacturer_public.pem`. The pubkey lives
    inside sector 0 (the bootloader region) and is read via normal
@@ -490,7 +490,7 @@ shows the attack, the layer that stops it, and the residual risk.
 | 6 | ~~Overwrite the OTP-resident pubkey with attacker's pubkey~~ ✅ **Overwrite the bootloader-embedded pubkey with attacker's pubkey** | ~~OTP write-once silicon (T12) — bits cannot be erased; setting more bits to 1 corrupts our key, fails closed~~ ✅ **Same controls as row 3** (BOOT005 + BOOT006 + BOOT007) — the embedded pubkey lives in the bootloader binary in sector 0, so substituting it requires writing sector 0, which every external path now blocks. See T12'. | ~~None — hardware-enforced~~ ✅ Low at the crypto layer on sealed production units; the original "fails-closed at the silicon layer" property is replaced by an operational guarantee (consistent with ArduPilot's deployed pattern) |
 | 7 | Use SWD/JTAG debugger to halt CPU and force the verify result to "pass" | ~~BOOT003 (RDP L2 permanently disables SWD/JTAG)~~ ✅ **BOOT007 (tamper-evident seal on the SWD pads) + RMA inspection workflow.** The seal-breaking step leaves visible evidence; returning units with broken seals are quarantined. | ~~None on production units; accepted on dev boards~~ ✅ Low at the crypto layer on sealed production units; physical-attacker residual handled procedurally |
 | 8 | Voltage / clock / EM glitch at the verify branch (fault injection) | Out of DGCA Level 1 scope. ~~RDP L2 raises the equipment bar (no debug header to attack electrically).~~ ✅ The tamper-evident seal raises the same equipment bar (no exposed pads to attack electrically without visibly breaking the seal). | Acknowledged residual risk; mitigation requires HSM-class silicon |
-| 9 | Forge an RSA-3072 signature without the private key | Cryptography (NIST recommends RSA-3072 past 2030; ~2^128 work to brute-force) | Out of practical reach |
+| 9 | Forge an RSA-2048 signature without the private key | Cryptography (RSA-2048 acceptable per NIST SP 800-57 through 2030; ~2^112 work to brute-force — re-key to RSA-3072/4096 or Ed25519 before then per ADR-016 migration playbook) | Out of practical reach |
 | 10 | Compromise the manufacturer's private key | Operational controls: HSM / offline storage, key ceremony, access controls | Single point of failure for any PKI-based system; same exposure as Apple/Microsoft/Google software signing |
 | 11 | Supply chain — inject malicious code into PX4 source before signing | Out of secure-boot scope. Mitigated by reproducible builds, code review, controlled build host | Acknowledged; not a software-attack-against-the-device vector |
 | 12 ⭐ | Supply-chain compromise of the **first-install** trust window (factory PX4 bootloader trusts anything; we use it once to load our first signed app fw) | Verify factory bootloader hash on receipt at our facility before first install (MANUFACTURING_RUNBOOK.md step 2); first install performed only at our trusted facility; sealed before shipping. | Acknowledged residual; same control category as supply-chain trust generally — mitigated procedurally |
@@ -505,7 +505,7 @@ shows the attack, the layer that stops it, and the residual risk.
 ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **Updated property statement:**
 
 > Every byte of code the CPU executes was authored by a party
-> holding the manufacturer's RSA-3072 private key, verified at boot
+> holding the manufacturer's RSA-2048 private key, verified at boot
 > against a public key embedded in the bootloader binary, with every
 > external path to overwrite that bootloader closed by software
 > (DFU refused, `bl_update` requires a signed app fw) or by
@@ -725,8 +725,11 @@ is permanently blown). Bits **cannot** be flipped back from 1 to 0
 — there is no erase command at the silicon level.
 
 STM32H7 has 1024 bytes of OTP organized as 32 blocks of 32 bytes
-each. We use it to store the manufacturer RSA-3072 public key
-(~422 bytes in DER format, occupying ~14 of the 32 blocks).
+each. ~~We use it to store the manufacturer RSA-3072 public key
+(~422 bytes in DER format, occupying ~14 of the 32 blocks).~~
+⚠️ **AMENDED 2026-05-04 (ADR-013):** OTP is no longer used — the
+manufacturer RSA-2048 pubkey (~294 bytes DER) is embedded in the
+bootloader binary instead.
 
 - **Why this is the right place for the trust anchor:** an attacker
   with physical access cannot erase or substitute the key. Setting

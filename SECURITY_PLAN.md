@@ -38,7 +38,7 @@ Based on the the audited reference-audited compliance documents (the audited ref
 | Manufacturer (build machine) | **Private key** | Signs firmware, manifests, update bundles; decrypts log .sig files |
 | Flight Controller (firmware) | **Public key** | Verifies signatures at runtime; encrypts log file hashes (LOG001) |
 
-- Only ONE keypair (RSA-3072) for the entire system
+- Only ONE keypair (RSA-2048 — amended 2026-05-06, ADR-016; was RSA-3072 originally) for the entire system
 - Private key NEVER leaves the manufacturer's build environment (HSM / offline)
 - Public key embedded in firmware as C header (`manufacturer_pubkey.h`) — used by app firmware
 - RSA enables both signing (firmware) AND encryption (log hashes) with one keypair
@@ -56,7 +56,7 @@ write / RDP burn operationally infeasible without breaking the Hex
 factory seal.
 
 ✅ **CURRENT — Bootstrap-trust + tamper-evident sealing (CubeOrange+ / STM32H7), Phase 5b target:**
-- RSA-3072 manufacturer pubkey is **embedded in the bootloader binary**
+- RSA-2048 manufacturer pubkey is **embedded in the bootloader binary**
   (and continues to be embedded in the app fw for UPD001 / manifest
   verification). Single source of truth: `pki/manufacturer/public/manufacturer_public.pem`.
 - Bootloader integrity is provided by:
@@ -78,7 +78,7 @@ factory seal.
 
 | ID     | Requirement                              | DGCA Clause       | Status        |
 |--------|------------------------------------------|-------------------|---------------|
-| ROT001 | Manufacturer RSA-3072 keypair            | RoT (Mfr)         | ✅ Done        |
+| ROT001 | Manufacturer RSA-2048 keypair            | RoT (Mfr)         | ✅ Done        |
 | ROT002 | Public key embedded in firmware           | RoT (Mfr)         | ✅ Done        |
 | CHK001 | SHA-256 checksums (code + data separate)  | Checksum           | ✅ Done        |
 | SIG001 | Manifest signed with manufacturer key     | Signing            | ✅ Done        |
@@ -110,7 +110,7 @@ Hash the firmware .text section at runtime using linker symbols `_stext/_etext`
 (flash start/end addresses) and compare against `manifest.code_hash`.
 The .text section includes code AND .rodata (read-only data, including
 compiled compliance parameter values from PAR001).
-- **Implementation:** `FirmwareIntegrityChecker::_verify_code_hash()` — mbedTLS SHA-256
+- **Implementation:** `FirmwareIntegrityChecker::_verify_code_hash()` — libtomcrypt SHA-256
 - **Pipeline:** `--code-bin` option hashes extracted .text section from ELF
 - **SITL:** Stubbed (returns true) — no flash to hash in simulation
 - **Status:** Code complete, pending first hardware build and test
@@ -121,7 +121,7 @@ and compare against `manifest.data_hash`. This is the .data section stored in fl
 that gets copied to RAM at boot — NOT the SD card parameter file (which changes
 legitimately during calibration). Security-critical parameters are statically compiled
 into .rodata (covered by POST002's code hash).
-- **Implementation:** `FirmwareIntegrityChecker::_verify_data_hash()` — mbedTLS SHA-256
+- **Implementation:** `FirmwareIntegrityChecker::_verify_data_hash()` — libtomcrypt SHA-256
 - **Pipeline:** `--data-bin` option hashes extracted .data section from ELF
 - **SITL:** Stubbed (returns true)
 - **Status:** Code complete, pending first hardware build and test
@@ -176,19 +176,19 @@ No timing gap, no race condition, no bypass via MAVLink/shell/BSON import.
 ### LOG001 — Per-file RSA signed audit log (the audited reference Section 8)
 All security events are logged to persistent storage (SD card) as 132-byte
 binary entries. Each entry has CRC32 integrity checking. The entire log file
-is signed using per-file RSA-3072 encryption.
+is signed using per-file RSA-2048 encryption.
 
 **Per-file RSA signing (the audited reference Section 8 — implemented):**
 1. FC writes 132-byte entries to `audit_log.bin` (signature field zeroed, CRC32 only)
 2. After each entry write, FC computes SHA-256 of the complete `audit_log.bin`
-3. FC encrypts the 32-byte hash with the embedded RSA-3072 **public key** (PKCS#1 v1.5)
-4. Encrypted hash (384 bytes) saved as `audit_log.sig` alongside the log
+3. FC encrypts the 32-byte hash with the embedded RSA-2048 **public key** (PKCS#1 v1.5)
+4. Encrypted hash (256 bytes) saved as `audit_log.sig` alongside the log
 5. Manufacturer verifies offline: decrypts `.sig` with **private key**, compares SHA-256 hashes
 6. GCS downloads both `.bin` log and `.sig` via MAVLink FTP (two buttons in Audit Log panel)
 
 **Why RSA for log signing:** the audited reference Section 8 requires public-key encryption
-of the log hash. RSA-3072 supports encryption with the public key (ECDSA
-does not). Using the same RSA-3072 keypair for both firmware signing and
+of the log hash. RSA-2048 supports encryption with the public key (ECDSA
+does not). Using the same RSA-2048 keypair for both firmware signing and
 log signing keeps the architecture to a single keypair.
 
 **No per-entry signing:** Previous implementation used per-entry ECDSA
@@ -287,7 +287,7 @@ The bootloader becomes the verification authority for both paths:
 
 ```
 On every boot (POST):
-  1. Bootloader uses its embedded RSA-3072 manufacturer pubkey
+  1. Bootloader uses its embedded RSA-2048 manufacturer pubkey
      (compiled into the bootloader binary — ADR-013)
   2. Bootloader hashes app firmware in flash (SHA-256)
   3. Bootloader verifies firmware signature using embedded pubkey
@@ -310,7 +310,7 @@ On firmware update (Path A — DFU):
   located in PX4-Autopilot's bootloader fork — confirm path in WSL)
 - Embed libtomcrypt RSA-PSS / SHA-256 primitives in bootloader (Path C —
   libtomcrypt is already linked into NuttX; no new dependency on hardware)
-- Embed manufacturer RSA-3072 pubkey directly in bootloader binary
+- Embed manufacturer RSA-2048 pubkey directly in bootloader binary
   (compiled-in symbol, sourced from `pki/manufacturer/public/manufacturer_public.pem`)
 - Hook signature verification into the boot path (firmware-launch decision)
 - Sign the bootloader binary at build time using the manufacturer key
@@ -346,8 +346,8 @@ production units require BOOT005 + BOOT006 + BOOT007.
 > [Docs/ARCHITECTURE.md §12 ADR-013](Docs/ARCHITECTURE.md).
 
 ✅ **CURRENT — Manufacturer pubkey embedded in bootloader binary:**
-- The RSA-3072 manufacturer pubkey is compiled into the bootloader as
-  a constant data symbol (DER SubjectPublicKeyInfo, ~422 bytes), sourced
+- The RSA-2048 manufacturer pubkey is compiled into the bootloader as
+  a constant data symbol (DER SubjectPublicKeyInfo, ~294 bytes), sourced
   from `pki/manufacturer/public/manufacturer_public.pem` at build time.
 - The same pubkey continues to be embedded in the app fw (existing
   `firmware/include/manufacturer_pubkey.h` flow) for UPD001 / manifest
@@ -458,7 +458,7 @@ ever write sector 0:
 - **Bootstrap-trust root:** because `bl_update` runs *inside* the app
   fw, and the app fw is signature-verified by the bootloader on every
   boot (BOOT001), only a manufacturer-signed app fw can ever push a
-  new bootloader. An attacker without the manufacturer's RSA-3072
+  new bootloader. An attacker without the manufacturer's RSA-2048
   private key cannot get a malicious bootloader past sector 0,
   regardless of physical access (DFU is refused; SWD requires
   breaking the seal).
@@ -540,7 +540,7 @@ physical anti-tamper on production avionics.
 ### Phase 1 — Manufacturer Toolchain ✅ Complete
 | Sub-phase | Req ID | Description |
 |-----------|--------|-------------|
-| 1.1 | ROT001 | RSA-3072 keypair generation |
+| 1.1 | ROT001 | RSA-2048 keypair generation (originally RSA-3072 — re-keyed 2026-05-06, ADR-016) |
 | 1.2 | CHK001 | SHA-256 firmware checksum tool |
 | 1.3 | SIG001 | Manifest signing tool |
 | 1.4 | ROT002 | Public key embed tool (C header) |
@@ -586,11 +586,11 @@ but is no longer a de-risking requirement.
 
 | Sub-phase | Req ID | Description | Status |
 |-----------|--------|-------------|--------|
-| 5.1 | POST002 | Code hash verification from flash [_stext, _etext) via mbedTLS SHA-256 | ✅ Code done |
-| 5.2 | POST003 | Data hash verification from flash [_eronly, _edata-_sdata) via mbedTLS | ✅ Code done |
+| 5.1 | POST002 | Code hash verification from flash [_stext, _etext) via libtomcrypt SHA-256 | ✅ Code done |
+| 5.2 | POST003 | Data hash verification from flash [_eronly, _edata-_sdata) via libtomcrypt | ✅ Code done |
 | 5.3 | POST004 | Board ID verification (SECURE_BOOT_BOARD_ID from firmware.prototype) | ✅ Code done |
-| 5.4 | — | Enable CONFIG_MODULES_SECURE_BOOT + CONFIG_CRYPTO_MBEDTLS for CubeOrange+ | ✅ Done |
-| 5.5 | — | CMakeLists.txt: mbedTLS include path + board_id compile define from prototype | ✅ Done |
+| 5.4 | — | Enable CONFIG_MODULES_SECURE_BOOT + CONFIG_CRYPTO (libtomcrypt) for CubeOrange+ | ✅ Done |
+| 5.5 | — | CMakeLists.txt: libtomcrypt include path + board_id compile define from prototype | ✅ Done |
 | 5.6 | — | Pipeline: --board-id, --code-bin, --data-bin for hardware section hashing | ✅ Done |
 | 5.7 | — | ARM toolchain installation in WSL2 | ⏳ User action |
 | 5.8 | — | First hardware build + flash + test (dev bootloader, no DFU-refuse, no seal) | ⏳ Pending toolchain |
@@ -610,7 +610,7 @@ PX4 platform mechanisms (`bl_update`).
 | ~~Sub-phase~~ | ~~Req ID~~ | ~~Description~~ | ~~Status~~ |
 |---|---|---|---|
 | ~~5b.1~~ | ~~BOOT001~~ | ~~Locate PX4 bootloader source in WSL; identify flash-write entry points~~ | ~~⏳ Planned~~ |
-| ~~5b.2~~ | ~~BOOT001~~ | ~~Add mbedTLS sig-verify primitives to bootloader build~~ | ~~⏳ Planned~~ |
+| ~~5b.2~~ | ~~BOOT001~~ | ~~Add libtomcrypt sig-verify primitives to bootloader build~~ | ~~⏳ Planned~~ |
 | ~~5b.3~~ | ~~BOOT002~~ | ~~OTP-read driver in bootloader (HAL-level access to STM32H7 OTP region)~~ | ~~⏳ Planned~~ |
 | ~~5b.4~~ | ~~BOOT001~~ | ~~Hook sig-verification into bootloader boot path (POST in bootloader)~~ | ~~⏳ Planned~~ |
 | ~~5b.5~~ | ~~BOOT001~~ | ~~Hook sig-verification into bootloader flash-write path~~ | ~~⏳ Planned~~ |
@@ -684,16 +684,16 @@ full rationale and prior-art comparison (ArduPilot pattern).
 
 | Usage | Algorithm | Notes |
 |-------|-----------|-------|
-| Signing key | RSA-3072 | NIST SP 800-57, 128-bit security, recommended beyond 2030 |
-| Signature scheme | RSA-PSS (SHA-256, MGF1-SHA256) | Modern provably-secure RSA signature, NIST SP 800-131A |
-| Log signing | RSA-3072 public key encryption | Per-file: FC encrypts log hash with public key (the audited reference Section 8) |
+| Signing key | RSA-2048 | NIST SP 800-57 acceptable through 2030; matches the audited reference reference (amended 2026-05-06, ADR-016 — was RSA-3072) |
+| Signature scheme | RSA-PSS (SHA-256, MGF1-SHA256, salt length 32) | Modern provably-secure RSA signature, NIST SP 800-131A. Saltlen=32 is the project-wide convention applied uniformly to every signer (signer.py, toc_sign.py, export_manifest.py) and verifier (device OpenSSL/libtomcrypt, QGC BCrypt). |
+| Log signing | RSA-2048 public key encryption | Per-file: FC encrypts log hash with public key (the audited reference Section 8) |
 | Hash | SHA-256 | Minimum per DGCA Level 1 |
 | Key encoding (storage) | PEM | |
-| Key encoding (firmware) | DER SubjectPublicKeyInfo | ~422 bytes for RSA-3072 |
-| Signature size | 384 bytes | Fixed (3072 / 8) |
+| Key encoding (firmware) | DER SubjectPublicKeyInfo | ~294 bytes for RSA-2048 |
+| Signature size | 256 bytes | Fixed (2048 / 8) |
 | Corruption detection | CRC32 | For binary manifest and audit entries |
 | Crypto library (SITL) | OpenSSL | Available on host OS |
-| Crypto library (hardware) | mbedTLS | Lightweight, designed for MCU (STM32) |
+| Crypto library (NuttX — app fw + bootloader) | libtomcrypt | Already linked into PX4; sized for MCU (STM32). Earlier docs said mbedTLS — never accurate; corrected 2026-05-07. |
 
 ---
 

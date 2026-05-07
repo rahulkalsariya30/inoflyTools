@@ -1,6 +1,6 @@
 # Inofly UAS Firmware Security — Architecture Reference
 
-**Status:** 🔒 LOCKED — 2026-04-29 · 🟡 PARTIALLY AMENDED — 2026-05-04 (ADR-013/014/015)
+**Status:** 🔒 LOCKED — 2026-04-29 · 🟡 PARTIALLY AMENDED — 2026-05-04 (ADR-013/014/015) · 🟡 KEY-SIZE AMENDED — 2026-05-06 (ADR-016)
 **Scope:** DGCA Level 1 Type Certification, firmware manufacturer role
 **Target hardware:** CubeOrange+ (STM32H743/H753) initially; future-portable
 **Document owner:** Architecture is frozen at this revision. Material
@@ -16,9 +16,11 @@ team agreement.
 > factory seal, making OTP write, RDP burn, and WRP option-byte set
 > operationally infeasible. The architecture now uses an
 > **ArduPilot-style bootstrap-trust chain + tamper-evident sealing**
-> in place of OTP+RDP. **The single-keypair, RSA-3072, libtomcrypt,
-> POST, ARM-gate, LOG001, PAR001, PAIR001, UPD001 decisions are
-> unchanged.** Read §12.13–§12.15 for the new ADRs.
+> in place of OTP+RDP. **The single-keypair, libtomcrypt, POST,
+> ARM-gate, LOG001, PAR001, PAIR001, UPD001 decisions are unchanged.**
+> (The RSA key size has since been re-tuned from 3072 to 2048 — see
+> ADR-016, 2026-05-06.) Read §12.13–§12.15 for the bootstrap/sealing
+> ADRs and §12.16 for the key-size amendment.
 >
 > **Reading convention used below.** Retired material is rendered in
 > `~~strikethrough~~` (or labelled **🚫 RETIRED** for code-block
@@ -76,14 +78,14 @@ requires a recorded entry in §12 and team agreement.
 
 | # | Locked decision | Rationale source |
 |---|---|---|
-| L1 | **Single RSA-3072 keypair** for firmware signing, manifest signing, update-bundle signing, audit-log encryption | §3, ADR-001 |
+| L1 | **Single RSA-2048 keypair** for firmware signing, manifest signing, update-bundle signing, audit-log encryption (key size amended from RSA-3072 by ADR-016, 2026-05-06; single-keypair core unchanged) | §3, ADR-001, ADR-016 |
 | L2 | **Manufacturer role only** — we sign artifacts; we are not the certifying body | DGCA Level 1 scope |
 | L3 | **Target hardware: STM32H743/H753** (CubeOrange+) for initial deployment | §4, hardware on hand |
-| L4 | ~~**Trust anchor: RSA-3072 public key in STM32H7 OTP** (full DER pubkey, ~422 bytes)~~ ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **CURRENT:** RSA-3072 public key **embedded in the bootloader binary** (and in app fw for UPD001 / manifest verification). No OTP burn — CubeOrange+ carrier has no accessible BOOT0; breaking the Hex factory seal is operationally infeasible. | §3, ADR-002, ADR-013 |
+| L4 | ~~**Trust anchor: RSA-3072 public key in STM32H7 OTP** (full DER pubkey, ~422 bytes)~~ ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **CURRENT:** RSA-2048 public key **embedded in the bootloader binary** (and in app fw for UPD001 / manifest verification). No OTP burn — CubeOrange+ carrier has no accessible BOOT0; breaking the Hex factory seal is operationally infeasible. | §3, ADR-002, ADR-013, ADR-016 |
 | L5 | ~~**Bootloader is a verifier, not chip-verified** — bootloader's own integrity comes from RDP Level 2, not from runtime signature check (STM32H743 has no authenticating Boot ROM)~~ ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **CURRENT:** bootloader is still a verifier (it checks the firmware signature on every boot — BOOT001) and is still not chip-verified at runtime. Bootloader integrity now comes from a **bootstrap-trust chain** (only path to write sector 0 is `bl_update` from a running, signed app fw) + **tamper-evident sealing** of the airframe and Cube enclosure. | §4.2, ADR-003, ADR-013 |
 | L6 | **No flash encryption (no AES-in-OTP)** for Level 1 — the audited reference-style confidentiality control is not required by DGCA Level 1 | §10, ADR-004 |
-| L7 | **mbedTLS on hardware, OpenSSL on host/SITL** *(libtomcrypt is the actual library used on NuttX — see PROJECT_NOTES.md / project memory; this row's wording is stale, the substantive decision "MCU-sized crypto on device, OpenSSL on host" is unchanged)* | PROJECT_NOTES.md, ADR-005 |
-| L8 | **Audit log: per-file RSA-3072 signing**, public-key encryption of SHA-256 hash | SECURITY_PLAN.md §LOG001, ADR-006 |
+| L7 | **libtomcrypt on NuttX (app fw + bootloader), OpenSSL on host/SITL** — both speak RSA-PSS / SHA-256 interoperably; libtomcrypt is the MCU-sized library already linked into PX4 (no new dependency). Earlier doc revisions said "mbedTLS on hardware"; that wording was always stale — the actual library is libtomcrypt. ADR-005 reworded 2026-05-07 to match. | PROJECT_NOTES.md, ADR-005 |
+| L8 | **Audit log: per-file RSA-2048 signing**, public-key encryption of SHA-256 hash | SECURITY_PLAN.md §LOG001, ADR-006, ADR-016 |
 | L9 | **Static parameter compilation** for compliance-critical params (zero-window protection) | SECURITY_PLAN.md §PAR001, ADR-007 |
 | L10 | **MAVLink signing with `SHA256(passphrase)` key derivation** for GCS-FC pairing | SECURITY_PLAN.md §PAIR001, ADR-008 |
 | L11 | **POST in app firmware on SITL; POST in bootloader on hardware** (Phase 5b) | SECURITY_PLAN.md §Phase 5b, ADR-009 |
@@ -125,8 +127,8 @@ Components in scope:
 
 | Role | Who | What they hold |
 |---|---|---|
-| **Manufacturer (us)** | Inofly engineering | RSA-3072 **private** key (offline, HSM/secure storage). Signs all artifacts. |
-| **Flight controller** | The drone hardware | RSA-3072 **public** key ~~(in STM32H7 OTP after factory provisioning)~~ ✅ **CURRENT (ADR-013):** embedded in bootloader + app firmware binaries |
+| **Manufacturer (us)** | Inofly engineering | RSA-2048 **private** key (offline, HSM/secure storage). Signs all artifacts. |
+| **Flight controller** | The drone hardware | RSA-2048 **public** key ~~(in STM32H7 OTP after factory provisioning)~~ ✅ **CURRENT (ADR-013):** embedded in bootloader + app firmware binaries |
 | **Ground control station** | QGroundControl + Inofly plugin | MAVLink signing key (per-drone, derived from operator passphrase) |
 | **Operator** | Pilot / fleet manager | MAVLink signing passphrase (shared with their drone via factory provisioning) |
 | **Certifying body (CB)** | DGCA-appointed third party | (No special key — verifies our signatures using our published public key) |
@@ -149,7 +151,7 @@ inspects and certifies.
 
 ### 3.1 The single-keypair decision
 
-**One RSA-3072 keypair signs and decrypts everything.** Specifically:
+**One RSA-2048 keypair signs and decrypts everything.** Specifically:
 
 | Artifact | Operation | Key used |
 |---|---|---|
@@ -178,27 +180,37 @@ inspects and certifies.
 
 | Key | Location | Protection |
 |---|---|---|
-| RSA-3072 **private** key | Manufacturer HSM / offline secure storage. **NEVER on any deployed device.** | HSM access controls, key ceremony, physical security |
-| RSA-3072 **public** key (deployed) | ~~STM32H7 OTP (write-once silicon fuses)~~ ⚠️ AMENDED 2026-05-04 (ADR-013). ✅ **CURRENT:** embedded in **bootloader binary** + **app firmware binary** (single source: `pki/manufacturer/public/manufacturer_public.pem`) | ~~Hardware-immutable after provisioning~~ → **Bootstrap-trust chain** (sector 0 only writable via `bl_update` from a running signed app fw) + **tamper-evident sealing** of airframe + Cube |
-| RSA-3072 public key (build-time) | `pki/manufacturer/public/manufacturer_public.pem` (in repo) | Public — no secrecy required |
+| RSA-2048 **private** key | Manufacturer HSM / offline secure storage. **NEVER on any deployed device.** | HSM access controls, key ceremony, physical security |
+| RSA-2048 **public** key (deployed) | ~~STM32H7 OTP (write-once silicon fuses)~~ ⚠️ AMENDED 2026-05-04 (ADR-013). ✅ **CURRENT:** embedded in **bootloader binary** + **app firmware binary** (single source: `pki/manufacturer/public/manufacturer_public.pem`) | ~~Hardware-immutable after provisioning~~ → **Bootstrap-trust chain** (sector 0 only writable via `bl_update` from a running signed app fw) + **tamper-evident sealing** of airframe + Cube |
+| RSA-2048 public key (build-time) | `pki/manufacturer/public/manufacturer_public.pem` (in repo) | Public — no secrecy required |
 | MAVLink signing key (per-drone) | Derived from operator passphrase as `SHA256(passphrase)` — held in QGC and in FC parameter | Operator chooses passphrase strength; key never transmitted |
 
 **Compromise of any deployed device yields only the public key.** The
 public key is, by definition, public — leaking it does not enable
 forging signatures.
 
-### 3.3 Why RSA-3072 (not RSA-2048, not ECDSA)
+### 3.3 Why RSA-2048 (not ECDSA, not RSA-3072)
 
-- **RSA-3072 vs RSA-2048:** NIST SP 800-57 recommends 3072+ bits for
-  use beyond 2030. the audited reference reference uses RSA-2048; we chose
-  stronger. Same RSA-PSS scheme otherwise.
 - **RSA vs ECDSA:** RSA supports both signing AND public-key encryption
   with one primitive. ECDSA does not encrypt — it would require an
   additional ECIES or RSA layer for the audit-log encryption use case.
   Single-primitive simplicity won.
-- **Performance is acceptable on STM32H7:** mbedTLS RSA-3072 verify on
-  H743 @ 480 MHz takes ~50 ms — fine for boot-time POST. Signing is
-  not done on-device.
+- **RSA-2048 vs RSA-3072:** RSA-2048 meets DGCA Level 1 (matches the
+  the audited reference reference) and produces smaller artifacts (256-byte
+  signatures vs 384, ~294-byte SPKI DER vs ~422). Smaller artifacts
+  matter most in the bootloader — sector 0 is 128 KB on STM32H743 and
+  every kilobyte of crypto-library footprint comes out of the
+  application headroom. The original ADR-002 chose RSA-3072 for
+  beyond-2030 NIST headroom; ADR-016 (2026-05-06) reverses that for
+  footprint and audit-alignment reasons. The single-keypair, RSA-PSS
+  (SHA-256, MGF1-SHA256, saltlen=32) scheme is unchanged.
+- **Performance is acceptable on STM32H7:** libtomcrypt RSA-2048
+  verify on H743 @ 480 MHz takes well under 50 ms — fine for boot-time
+  POST. Signing is not done on-device.
+
+(Earlier ARCHITECTURE.md revisions said "mbedTLS RSA-3072 verify on
+H743" in this section — both halves of that line were stale: mbedTLS
+was never linked, and the key size is now RSA-2048 per ADR-016.)
 
 ---
 
@@ -213,7 +225,7 @@ forging signatures.
 | **Option bytes** | Configuration region (separate from flash) | ~~RDP level, BOOT pin behavior, write-protection~~ ⚠️ AMENDED 2026-05-04 (ADR-013) — **not modified by our provisioning; option bytes left at factory defaults** |
 | **SWD/JTAG** | Standard ARM debug | Dev-time programming and debug |
 | **System bootloader (DFU)** | ROM-resident DFU loader | Field firmware update via USB (open in dev, locked in production) |
-| **Cryptographic accelerator (CRYP)** | AES, DES (hardware) | Not used today (mbedTLS in software) |
+| **Cryptographic accelerator (CRYP)** | AES, DES (hardware) | Not used today (libtomcrypt in software handles all device-side crypto) |
 | **TRNG** | Hardware random number generator | Available; not currently used for trust chain |
 
 ### 4.2 What the chip does NOT provide (and why this matters)
@@ -272,7 +284,7 @@ AES key for flash encryption if BOOT004 is added later).~~
 
 #### ✅ CURRENT — public-key deployment under ADR-013
 
-The manufacturer RSA-3072 public key is **embedded in the bootloader
+The manufacturer RSA-2048 public key is **embedded in the bootloader
 binary** at build time (and also in the application firmware binary
 for UPD001 / manifest verification). Both copies are derived from the
 same `pki/manufacturer/public/manufacturer_public.pem` source file by
@@ -401,7 +413,7 @@ step 6).
 | Layer | Protected by | Mechanism |
 |---|---|---|
 | Tamper-evident seal | Operational (manufacturing + RMA workflow) | Serialized holographic / void-pattern seal on airframe AND Cube; UID + seal-serial recorded at manufacture; broken seal at RMA → quarantine |
-| Bootloader binary | (a) Software DFU-refuse (ADR-014) (b) Tamper-evident seal blocking SWD/JTAG access (c) Bootstrap-trust (sector 0 write only via `bl_update` from running signed app fw — ADR-015) | The bootloader cannot be replaced by anyone holding less than the manufacturer's RSA-3072 private key + access to break the seal + access to sign a malicious app fw whose ROMFS contains the malicious bootloader |
+| Bootloader binary | (a) Software DFU-refuse (ADR-014) (b) Tamper-evident seal blocking SWD/JTAG access (c) Bootstrap-trust (sector 0 write only via `bl_update` from running signed app fw — ADR-015) | The bootloader cannot be replaced by anyone holding less than the manufacturer's RSA-2048 private key + access to break the seal + access to sign a malicious app fw whose ROMFS contains the malicious bootloader |
 | Bootloader trust anchor (manufacturer pubkey) | Embedded in bootloader binary | Modifying the embedded pubkey requires writing sector 0, which inherits the protections above |
 | Firmware code | Bootloader signature check (BOOT001) | Hashed and RSA-PSS-verified on every boot using the bootloader-embedded pubkey |
 | Manifest | Firmware signature check (POST001) | RSA-PSS-verified on every boot using firmware-embedded pubkey (which was itself protected by the firmware sig check) |
@@ -443,7 +455,7 @@ Each layer's trust comes from:
 
 The chain is rooted at two points: **operational integrity** (the
 tamper-evident seal anchors the physical-attacker class) and
-**cryptography** (RSA-3072 signatures + bootstrap-trust anchor the
+**cryptography** (RSA-2048 signatures + bootstrap-trust anchor the
 USB-attacker class). All downstream layers (#3–#7) are
 cryptographically protected.
 
@@ -574,10 +586,10 @@ the manifest and chip-identity match. Both are required.**
 
 | Artifact | What it is | Signed by | Verified where | Verified when |
 |---|---|---|---|---|
-| **Application firmware** (`px4_fmu-v6x_default.bin` or equivalent) | The PX4 firmware binary | Manufacturer (RSA-3072 PSS, offline) | Bootloader on FC (mbedTLS) | Every boot |
-| **Bootloader** (`bootloader.bin`) | PX4 bootloader (Phase 5b patched version) | Manufacturer (RSA-3072 PSS, offline) | Factory programming tool (build-time only) | At factory flash; **not at runtime** on STM32H743 |
-| **`manifest.bin`** | Binary blob with code_hash, data_hash, board_id, version, signature | Manufacturer (RSA-3072 PSS, offline) | Firmware POST module on FC (mbedTLS) | Every boot |
-| **`.fwbundle`** (update package) | Tar of firmware + manifest + signature | Manufacturer (RSA-3072 PSS, offline) | (a) QGC plugin client-side (OpenSSL) and (b) FC `FirmwareUpdateGatekeeper` (mbedTLS) | Pre-flash, before staging |
+| **Application firmware** (`px4_fmu-v6x_default.bin` or equivalent) | The PX4 firmware binary | Manufacturer (RSA-2048 PSS, offline) | Bootloader on FC (libtomcrypt) | Every boot |
+| **Bootloader** (`bootloader.bin`) | PX4 bootloader (Phase 5b patched version) | Manufacturer (RSA-2048 PSS, offline) | Factory programming tool (build-time only) | At factory flash; **not at runtime** on STM32H743 |
+| **`manifest.bin`** | Binary blob with code_hash, data_hash, board_id, version, signature | Manufacturer (RSA-2048 PSS, offline) | Firmware POST module on FC (libtomcrypt) | Every boot |
+| **`.fwbundle`** (update package) | Tar of firmware + manifest + signature | Manufacturer (RSA-2048 PSS, offline) | (a) QGC plugin client-side (BCrypt on Windows / OpenSSL elsewhere) and (b) FC `FirmwareUpdateGatekeeper` (libtomcrypt) | Pre-flash, before staging |
 | **Audit log** (`audit_log.bin`) | Append-only event log on FC SD card | Encrypted SHA-256 hash signed per-file | Manufacturer offline tool (`verify_audit_log.py`, OpenSSL) | After log download |
 
 ### 6.2 What is NOT signed (and why it's OK)
@@ -621,7 +633,7 @@ reset.
 4. RETIRED: Bootloader reads the manufacturer RSA-3072 public key from
    the OTP region (e.g. 0x08FFF000-0x08FFF3FF). OTP read is via
    memory-mapped I/O, internal to the chip.
-   CURRENT (ADR-013): Bootloader uses its own embedded RSA-3072 public
+   CURRENT (ADR-013): Bootloader uses its own embedded RSA-2048 public
    key symbol (manufacturer_pubkey[], compiled into the bootloader
    binary at build time from pki/manufacturer/public/manufacturer_public.pem).
    No OTP access; the symbol is in code flash adjacent to the verify routine.
@@ -735,7 +747,7 @@ must be gated.
 | Path B (MAVLink-FTP) | UPD001 (QGC + FC verify) | UPD001 + BOOT001 (bootloader re-verify) |
 
 After Phase 5b, **every byte of code the CPU executes was signed by
-the manufacturer's RSA-3072 private key**, regardless of which path
+the manufacturer's RSA-2048 private key**, regardless of which path
 delivered it.
 
 ### 8.4 ~~How updates work on a chip locked by RDP L2~~ How updates work under the bootstrap-trust architecture
@@ -803,7 +815,7 @@ not "completely write-protected."
 ```
 
 The crucial security property: **the only entity that can deliver a
-working firmware update is one holding the manufacturer's RSA-3072
+working firmware update is one holding the manufacturer's RSA-2048
 private key.** ~~Even though RDP L2 allows internal writes,~~ ✅ Even
 though running firmware can write flash internally, an attacker cannot
 push an update because:
@@ -863,7 +875,7 @@ setting that blocks ALL writers including running firmware:~~
 The **bootloader region is updatable, but only by the manufacturer**.
 Every byte of the chain (sector 0, app fw, manifest) is reachable for
 write only by code that itself was signed with the manufacturer's
-RSA-3072 private key. The trade-offs:
+RSA-2048 private key. The trade-offs:
 
 - **Pro:** the trust anchor of the chain (the bootloader that does
   verification) cannot be replaced by anyone holding less than the
@@ -952,7 +964,7 @@ updates**, not **secrecy of checksum values**.
 | Sub-property | Our mechanism |
 |---|---|
 | Checksums **stored** in flight module | `manifest.bin` written to flash by factory provisioning (PRV001) |
-| **Securely** | RSA-3072 signed by manufacturer; tamper detected by signature verification at every boot |
+| **Securely** | RSA-2048 signed by manufacturer; tamper detected by signature verification at every boot |
 | **Cannot be updated without authorization** | Only the manufacturer (holder of the private key) can produce a `manifest.bin` whose signature the FC will accept. An attacker can rewrite the bytes, but the result will fail signature verification → POST fails → drone refuses to arm. |
 
 **The auditor walk-through:**
@@ -1028,13 +1040,13 @@ the audited reference's protection of registered checksums is **confidentiality-
 **✅ CURRENT 2026-05-04 (ADR-013):**
 
 ```
-[Bootloader binary: RSA-3072 public key embedded]   ← compiled in
+[Bootloader binary: RSA-2048 public key embedded]   ← compiled in
         │ used by bootloader to verify firmware
         ▼
 [Plain flash, signed firmware]   ← readable, tampering detectable
         │ contains
         ▼
-[manifest.bin — RSA-3072 signed]   ← any modification breaks signature
+[manifest.bin — RSA-2048 signed]   ← any modification breaks signature
         │ + tamper-evident seal blocks SWD; bl_update is the only sector-0 write path
 ```
 
@@ -1100,7 +1112,7 @@ production secure-boot pattern.
 | **STM32H5 with RSS** | RSS-managed trust anchor | Yes — Root Secure Services | ST's modern MCU production flow |
 | **ARM Trusted Firmware (TF-A)** | Root pubkey hash in SoC fuses | Yes — BL1 (immutable) | Industry-standard ARM secure boot |
 | ~~**Inofly (this project)** on STM32H743~~ | ~~RSA-3072 pubkey in STM32H7 OTP~~ | ~~**No** — bootloader integrity from RDP L2, not runtime sig check~~ | ~~DGCA Level 1~~ |
-| **Inofly (this project)** on STM32H743 ✅ **CURRENT 2026-05-04 (ADR-013)** | RSA-3072 pubkey **embedded in bootloader binary** | **No** — bootloader integrity from **bootstrap-trust chain + tamper-evident sealing**, not runtime sig check (same constraint as before: STM32H743 has no authenticating Boot ROM) | DGCA Level 1 |
+| **Inofly (this project)** on STM32H743 ✅ **CURRENT 2026-05-04 (ADR-013), key-size amended 2026-05-06 (ADR-016)** | RSA-2048 pubkey **embedded in bootloader binary** | **No** — bootloader integrity from **bootstrap-trust chain + tamper-evident sealing**, not runtime sig check (same constraint as before: STM32H743 has no authenticating Boot ROM) | DGCA Level 1 |
 | **ArduPilot** (production firmware, multi-vendor) | Up to 10 RSA pubkeys embedded in bootloader binary | **No** — bootloader integrity from chain-of-trust + (optional) software DFU-refuse | Hundreds of thousands of fielded units (the architectural pattern we adopted in ADR-013) |
 | **the audited reference (audit reference)** | AES-128 in OTP + RSA pubkey embedded in firmware | (Bootloader stores firmware hash; design unclear from reference) | Reference implementation |
 
@@ -1131,7 +1143,7 @@ This section records the major architectural decisions, with date,
 rationale, and alternatives considered. Append-only — supersession is
 recorded as a new entry referencing the old one.
 
-### ADR-001 — Single RSA-3072 keypair for everything (2026-04-15) ⚠️ Deployment sub-claim amended 2026-05-04 by ADR-013 (no OTP)
+### ADR-001 — Single RSA-2048 keypair for everything (2026-04-15) ⚠️ Deployment sub-claim amended 2026-05-04 by ADR-013 (no OTP) · ⚠️ Key size amended 2026-05-06 by ADR-016 (RSA-3072 → RSA-2048)
 
 **Decision:** Use one manufacturer keypair for firmware signing,
 manifest signing, update-bundle signing, AND audit-log encryption.
@@ -1151,19 +1163,30 @@ The single-keypair core decision is unchanged.
 and public-key encryption; compromise scenarios are not worse with one
 key than with multiple.
 
-### ADR-002 — RSA-3072 (not RSA-2048) (2026-04-15)
+### ADR-002 — ~~RSA-3072 (not RSA-2048)~~ (2026-04-15) ⚠️ **REVERSED 2026-05-06 by ADR-016 — production now uses RSA-2048**
 
-**Decision:** Use RSA-3072 PSS for all signatures.
+> **🟡 SUPERSEDED 2026-05-06 (ADR-016).** The original decision below
+> chose RSA-3072 over RSA-2048 for beyond-2030 NIST headroom. ADR-016
+> reverses that choice: production now uses **RSA-2048** for smaller
+> on-device artifacts (especially in the bootloader sector-0 budget)
+> and tighter alignment with the the audited reference audit reference. The
+> RSA-vs-ECDSA half of this ADR (single primitive supporting both
+> sign and public-key-encrypt) is **unchanged** and still load-bearing.
+> Original text preserved below for traceability.
 
-**Alternatives considered:**
-- RSA-2048 (the audited reference reference uses this) — rejected. NIST
-  recommends 3072+ for use beyond 2030.
+~~**Decision:** Use RSA-3072 PSS for all signatures.~~
+
+~~**Alternatives considered:**~~
+- ~~RSA-2048 (the audited reference reference uses this) — rejected. NIST
+  recommends 3072+ for use beyond 2030.~~
 - ECDSA P-256 — rejected. Doesn't support public-key encryption,
   would require additional crypto layer for audit-log use case.
+  *(This rationale is unchanged under ADR-016 — RSA is still chosen
+  over ECDSA for the same reason.)*
 
-**Rationale:** Future-proof against NIST lifecycle; modest
+~~**Rationale:** Future-proof against NIST lifecycle; modest
 performance cost on STM32H7 (~50 ms verify); single primitive for both
-signing and encryption.
+signing and encryption.~~
 
 ### ADR-003 — Bootloader integrity from RDP L2, not runtime signature check (2026-04-29) ⚠️ SUPERSEDED 2026-05-04 by ADR-013
 
@@ -1204,21 +1227,37 @@ anti-cloning (productization concerns), neither in Level 1 scope.
 Defers complexity (per-device key generation, per-unit encrypted
 firmware, factory tooling changes) without compromising compliance.
 
-### ADR-005 — mbedTLS on hardware, OpenSSL on host/SITL (2026-03-20)
+### ADR-005 — libtomcrypt on NuttX, OpenSSL on host/SITL (2026-03-20, library-name corrected 2026-05-07)
 
-**Decision:** Use mbedTLS for all cryptographic operations on
-embedded hardware (NuttX RTOS); use OpenSSL for host-side tooling and
+> **📝 Doc fix 2026-05-07.** Earlier revisions of this ADR named
+> **mbedTLS** as the on-device library. That was always wrong — PX4
+> already links **libtomcrypt** (for RSA) and **monocypher** (for
+> Ed25519); mbedTLS was never in the tree. The substantive decision
+> ("MCU-sized crypto on device, OpenSSL on host") is unchanged. The
+> Path C bootloader (BOOT001) extends the same already-linked
+> libtomcrypt to sector 0 — no new crypto dependency was ever added.
+
+**Decision:** Use **libtomcrypt** for all cryptographic operations on
+embedded hardware (NuttX RTOS — both app firmware and the verifying
+bootloader); use OpenSSL for host-side tooling and
 SITL.
 
 **Alternatives considered:**
-- mbedTLS everywhere — rejected. OpenSSL is the host-side standard,
-  better Python bindings.
+- libtomcrypt everywhere — rejected. OpenSSL is the host-side standard
+  with better Python bindings (via the `cryptography` package).
+- mbedTLS on hardware — rejected. Would have meant adding a fresh
+  crypto dependency to NuttX when libtomcrypt is already linked. Some
+  earlier planning material named mbedTLS without checking what PX4
+  actually ships; that wording is corrected.
 - OpenSSL everywhere — rejected. OpenSSL is too large for MCU flash
   budget.
 
 **Rationale:** Both libraries implement RSA-PSS / SHA-256 with full
-interoperability. mbedTLS is sized for MCU (~50 KB flash for the
-relevant subset). Using both gives best-of-both.
+interoperability. libtomcrypt is sized for MCU and is already linked
+into PX4 — no new dependency, and reusing the linked subset minimizes
+bootloader sector-0 footprint (the binding constraint per ADR-016).
+Using libtomcrypt on device + OpenSSL on host gives best-of-both
+without expanding the device dependency surface.
 
 ### ADR-006 — Per-file RSA log signing, not per-entry ECDSA (2026-04-22)
 
@@ -1323,7 +1362,7 @@ work focuses on shipping Phase 5b.
 RDP Level 2 silicon write-lockdown with a **bootstrap-trust chain +
 tamper-evident sealing** model:
 
-- **Public key location.** RSA-3072 manufacturer pubkey is embedded in
+- **Public key location.** RSA-2048 manufacturer pubkey is embedded in
   the **bootloader binary** (and continues to be embedded in app fw
   for UPD001 / manifest verification). No OTP burn. Single-keypair
   decision (ADR-001) is unchanged; only the deployment mechanism for
@@ -1387,7 +1426,9 @@ RDP Level 2 burn, and WRP option-byte set — all of which require BOOT0
   - Ed25519: LOG001's "FC pubkey-encrypts log hash, manufacturer
     decrypts offline" trick relies on RSA's asymmetric encryption
     capability; Ed25519 has no equivalent primitive. Cost of staying
-    on RSA-3072: ~40–50 KB extra in app fw vs Ed25519. Acceptable.
+    on RSA: ~25–35 KB extra in app fw vs Ed25519 under RSA-2048
+    (originally estimated ~40–50 KB under RSA-3072 — see ADR-016).
+    Acceptable.
   - 10-key model: appropriate for ArduPilot's multi-vendor ecosystem,
     not for a single-manufacturer deployment.
 - **Adopt ArduPilot's architectural pattern (embedded keys + ROMFS
@@ -1404,7 +1445,7 @@ security architecture as ArduPilot" story for the auditor.
 **What this does NOT change:**
 
 - Single-keypair decision (ADR-001 core)
-- RSA-3072 (ADR-002)
+- RSA-PSS scheme (ADR-002, key size later amended to RSA-2048 by ADR-016 — orthogonal to this ADR)
 - libtomcrypt on NuttX, OpenSSL on host (ADR-005's substantive intent)
 - LOG001 per-file RSA log signing (ADR-006)
 - PAR001 static parameter compilation (ADR-007)
@@ -1545,6 +1586,69 @@ external programming hardware. Bundling the bootloader in app fw is
 the standard PX4 capability — we are using the platform's intended
 mechanism, not building a custom one.
 
+### ADR-016 — RSA-2048 (reverses ADR-002 RSA-3072 choice) (2026-05-06, supersedes ADR-002)
+
+**Decision:** Migrate the manufacturer keypair from **RSA-3072** to
+**RSA-2048**. RSA-PSS scheme (SHA-256 hash, MGF1-SHA256, salt length
+32) is unchanged. Single-keypair decision (ADR-001) is unchanged.
+Embedded-pubkey deployment (ADR-013) is unchanged. The change is
+scoped to key size only.
+
+**What changes mechanically:**
+
+- Modulus / private key size: 3072 bits → 2048 bits
+- Signature size: 384 bytes → 256 bytes
+- SubjectPublicKeyInfo DER size: ~422 bytes → ~294 bytes
+- All consumers updated in lockstep across the three repos
+  (inoflyTools host signers + tests, PX4 fork bootloader and
+  secure_boot module, inoflyGCU QGC plugin)
+
+**Rationale:**
+
+- **Smaller artifacts where it matters most.** Bootloader sector 0
+  on STM32H743 is 128 KB. The libtomcrypt RSA bignum routines and
+  the embedded pubkey are both larger under RSA-3072; RSA-2048 frees
+  bootloader headroom that we want to keep available for future
+  bootloader features without forcing module strips on the app fw
+  side. App fw artifact size also drops (smaller embedded pubkey,
+  smaller signature in the manifest, smaller `.fwbundle`).
+- **Audit alignment.** the audited reference and the audited reference reference designs both use
+  RSA-2048. Matching them removes an explanation step in the auditor
+  conversation ("why are you stronger than the reference?") and
+  removes RSA-3072 as a *differentiator we have to defend* in audit.
+- **Sufficiency.** RSA-2048 satisfies DGCA Level 1's authenticity
+  requirement. NIST SP 800-57 still considers RSA-2048 acceptable
+  through 2030; we are inside that window. If we need to extend
+  beyond 2030, the migration path is clear (re-key + re-sign + ship
+  a new bootloader via `bl_update`).
+
+**Alternatives considered:**
+
+- **Stay on RSA-3072** — the original ADR-002 choice. Rejected for the
+  artifact-size and audit-alignment reasons above; the beyond-2030
+  argument is real but is more cleanly handled by a future re-key
+  than by carrying the larger key today.
+- **Move to ECDSA P-256 / Ed25519 to shrink artifacts further.**
+  Rejected for the same reason as ADR-002 originally rejected ECDSA:
+  LOG001 needs RSA's public-key-encryption capability, and we want
+  one primitive across signing and log encryption.
+
+**What this does NOT change:**
+
+- ADR-001 (single keypair) — still single keypair
+- ADR-002 RSA-vs-ECDSA decision — still RSA (only the bit-length
+  changes)
+- ADR-005, ADR-006, ADR-007, ADR-008 — unchanged
+- ADR-013/014/015 (bootstrap-trust + sealing + bl_update) — unchanged
+- PSS scheme parameters: SHA-256 hash, MGF1-SHA256, **salt length 32
+  bytes** (project-wide convention, applied to every signer and
+  verifier in the chain)
+
+**Migration status:** Code-complete and committed across all three
+repos as of 2026-05-06 (host) / 2026-05-07 (QGC plugin + saltlen
+unification). Documentation sweep (this ADR + body-text rewrite of
+RSA-3072 references) completed in the same batch.
+
 ---
 
 ## 13. Residual risks (acknowledged)
@@ -1602,7 +1706,7 @@ security primitives.
 
 Regardless of chip family, the following architectural elements
 carry over:
-- Single RSA-3072 keypair (or upgrade to RSA-4096 / Ed25519 if needed)
+- Single RSA-2048 keypair (re-key to RSA-3072/4096 or Ed25519 if needed — see ADR-016 for migration playbook)
 - Manifest format and signing process
 - POST logic and ARM-gate wiring
 - LOG001 audit-log signing approach
