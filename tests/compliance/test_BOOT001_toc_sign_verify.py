@@ -237,7 +237,9 @@ def test_BOOT001_wrong_key_fails_verify(synthetic_bin, keypair, other_keypair):
 
 def test_BOOT001_signer_uses_saltlen_32(synthetic_bin, keypair):
     """The bootloader's libtomcrypt verifier passes saltlen=32 to
-    rsa_verify_hash_ex. If the signer drifts to MAX_LENGTH (as signer.py uses),
+    rsa_verify_hash_ex. The project-wide convention is saltlen=32 across every
+    signer (signer.py, export_manifest.py, toc_sign.py) and verifier (device
+    OpenSSL/libtomcrypt, QGC BCrypt). If toc_sign drifts away from 32,
     verification on the device silently fails. We don't have introspection
     into PSS internals from `cryptography` directly — but we CAN verify
     end-to-end with saltlen=32 succeeds, and sanity-check that with

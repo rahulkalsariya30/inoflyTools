@@ -14,7 +14,8 @@ The verifying bootloader is a different consumer with different needs:
   - It needs the signature to live AT a fixed flash offset declared by the
     image's Table of Contents, so it can locate it via find_toc().
   - It uses a saltlen=32 RSA-PSS verifier (matches what libtomcrypt does in
-    the bootloader; signer.py's MAX_LENGTH would never verify there).
+    the bootloader, and matches the project-wide saltlen=32 convention used
+    by signer.py, export_manifest.py, and the QGC verifier).
 
 So this tool is a separate post-build pass: take the linker-produced .bin,
 locate the TOC, hash the BOOT region, RSA-PSS sign with saltlen=32, and
@@ -69,10 +70,12 @@ BOOT_DELAY_ADDRESS_DEFAULT = 0x000002A0
 TOC_OFFSET_DEFAULT = BOOT_DELAY_ADDRESS_DEFAULT + 8  # 0x2A8
 
 # RSA-2048 PSS produces a 256-byte signature. Salt length = 32 bytes (SHA-256
-# digest length) — matches what libtomcrypt's rsa_verify_hash_ex expects in
-# the bootloader (see crypto.c in the PX4 fork). Do NOT use PSS.MAX_LENGTH
-# here; that is what signer.py uses for the JSON bundle, and a saltlen
-# mismatch silently fails verification on the device.
+# digest length) — the project-wide convention shared by every signer and
+# verifier in the system: signer.py (JSON bundle), export_manifest.py
+# (provisioning), the device-side FirmwareIntegrityChecker (OpenSSL on SITL
+# and libtomcrypt on hardware — see crypto.c in the PX4 fork), and the QGC
+# BCrypt verifier. A saltlen mismatch silently fails verification on the
+# device, so do NOT change this without changing every consumer.
 RSA_PSS_SALT_LEN = 32
 RSA_2048_SIG_LEN = 256
 

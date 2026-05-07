@@ -90,13 +90,16 @@ def sign_manifest(manifest: dict, private_key_path: Path = PRIVATE_KEY_PATH) -> 
     manifest_bytes = _canonical_bytes(manifest)
 
     # Sign with RSA-PSS + SHA-256
-    # PSS is the modern provably-secure RSA signature scheme
-    # Salt length = hash length (32 bytes for SHA-256) per NIST recommendation
+    # PSS is the modern provably-secure RSA signature scheme.
+    # Salt length pinned to 32 (= SHA-256 output) to match the project-wide
+    # convention used by toc_sign.py, export_manifest.py, the device-side
+    # FirmwareIntegrityChecker (OpenSSL + libtomcrypt backends), and the QGC
+    # BCrypt verifier. All five must agree on saltlen or verification fails.
     signature = private_key.sign(
         manifest_bytes,
         padding.PSS(
             mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.MAX_LENGTH,
+            salt_length=32,
         ),
         hashes.SHA256(),
     )
@@ -148,7 +151,7 @@ def verify_bundle(signed_bundle: dict, public_key_path: Path = PUBLIC_KEY_PATH) 
             manifest_bytes,
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH,
+                salt_length=32,
             ),
             hashes.SHA256(),
         )
