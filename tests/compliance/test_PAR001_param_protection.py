@@ -14,23 +14,81 @@ Reference: the audited reference-audited compliance document, Sections 3.1(b) an
 """
 
 import re
-import pytest
-from pathlib import Path
+import subprocess
+from functools import lru_cache
 
-# Path to PX4 source in WSL (accessible from Windows)
-WSL_PX4 = Path(r"\\wsl.localhost\Ubuntu-22.04\home\rahul\PX4-Autopilot\src")
-WSL_SECURE_BOOT = WSL_PX4 / "modules" / "secure_boot"
-WSL_PARAMETERS = WSL_PX4 / "lib" / "parameters"
-WSL_MAVLINK = WSL_PX4 / "modules" / "mavlink"
+import pytest
+
+# WSL paths to PX4 source. Windows-side pytest cannot resolve
+# `\\wsl.localhost\...` UNC paths through pathlib reliably, so we
+# shell out via `wsl -e bash -c "..."` (the same pattern PAIR001 uses)
+# and skip cleanly if WSL or the file is unavailable.
+WSL_PX4_SRC = "$HOME/PX4-Autopilot/src"
+WSL_SECURE_BOOT = f"{WSL_PX4_SRC}/modules/secure_boot"
+WSL_PARAMETERS = f"{WSL_PX4_SRC}/lib/parameters"
+WSL_MAVLINK = f"{WSL_PX4_SRC}/modules/mavlink"
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+@lru_cache(maxsize=None)
+def _wsl_available():
+    """Detect once whether `wsl` itself is callable on this machine.
+
+    The PX4 source is only present on machines with a WSL2 install — on a
+    teammate's bare Linux/macOS box there is no `wsl` command at all, and
+    these tests should skip cleanly there.
+    """
+    try:
+        result = subprocess.run(
+            ["wsl", "-e", "bash", "-c", "true"],
+            capture_output=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _require_wsl():
+    if not _wsl_available():
+        pytest.skip("WSL not available on this machine")
+
+
+@lru_cache(maxsize=None)
+def _wsl_read(wsl_path):
+    """Read a file from WSL via `wsl -e bash -c 'cat ...'`.
+
+    Skips when WSL itself is unavailable (env issue); raises a clear
+    AssertionError when the file is missing (implementation gap — we
+    want this to surface as a test failure, not a silent skip).
+    """
+    _require_wsl()
+    result = subprocess.run(
+        ["wsl", "-e", "bash", "-c", f"cat {wsl_path}"],
+        capture_output=True,
+    )
+    assert result.returncode == 0, (
+        f"Cannot read {wsl_path} from WSL: "
+        f"{result.stderr.decode('utf-8', errors='replace').strip()}"
+    )
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+@lru_cache(maxsize=None)
+def _wsl_exists(wsl_path):
+    """Return True if `wsl_path` exists in WSL. Skips if WSL itself is unavailable."""
+    _require_wsl()
+    result = subprocess.run(
+        ["wsl", "-e", "bash", "-c", f"test -e {wsl_path} && echo 1 || echo 0"],
+        capture_output=True,
+    )
+    return result.stdout.strip() == b"1"
+
+
 def _read_header():
     """Read compliance_params.h and return its content."""
-    header_path = WSL_SECURE_BOOT / "compliance_params.h"
-    assert header_path.exists(), f"compliance_params.h not found at {header_path}"
-    return header_path.read_text(encoding="utf-8")
+    return _wsl_read(f"{WSL_SECURE_BOOT}/compliance_params.h")
 
 
 def _strip_comments(content):
@@ -95,8 +153,7 @@ class TestPAR001_HeaderExists:
 
     def test_PAR001_header_file_exists(self):
         """compliance_params.h must exist in the secure_boot module."""
-        header_path = WSL_SECURE_BOOT / "compliance_params.h"
-        assert header_path.exists()
+        assert _wsl_exists(f"{WSL_SECURE_BOOT}/compliance_params.h")
 
     def test_PAR001_header_has_pragma_once(self):
         """Header must have include guard."""
@@ -227,42 +284,42 @@ class TestPAR001_EnforcementCode:
 
     def test_PAR001_guard_hpp_exists(self):
         """ComplianceParamGuard.hpp must exist."""
-        assert (WSL_SECURE_BOOT / "ComplianceParamGuard.hpp").exists()
+        assert _wsl_exists(f"{WSL_SECURE_BOOT}/ComplianceParamGuard.hpp")
 
     def test_PAR001_guard_cpp_exists(self):
         """ComplianceParamGuard.cpp must exist."""
-        assert (WSL_SECURE_BOOT / "ComplianceParamGuard.cpp").exists()
+        assert _wsl_exists(f"{WSL_SECURE_BOOT}/ComplianceParamGuard.cpp")
 
     def test_PAR001_guard_in_cmake(self):
         """ComplianceParamGuard.cpp must be in CMakeLists.txt."""
-        cmake = (WSL_SECURE_BOOT / "CMakeLists.txt").read_text(encoding="utf-8")
+        cmake = _wsl_read(f"{WSL_SECURE_BOOT}/CMakeLists.txt")
         assert "ComplianceParamGuard.cpp" in cmake
 
     def test_PAR001_guard_included_in_main(self):
         """secure_boot_main.cpp must include ComplianceParamGuard."""
-        main = (WSL_SECURE_BOOT / "secure_boot_main.cpp").read_text(encoding="utf-8")
+        main = _wsl_read(f"{WSL_SECURE_BOOT}/secure_boot_main.cpp")
         assert '#include "ComplianceParamGuard.hpp"' in main
 
     def test_PAR001_guard_instantiated_in_main(self):
         """secure_boot_main.cpp must instantiate ComplianceParamGuard."""
-        main = (WSL_SECURE_BOOT / "secure_boot_main.cpp").read_text(encoding="utf-8")
+        main = _wsl_read(f"{WSL_SECURE_BOOT}/secure_boot_main.cpp")
         assert "ComplianceParamGuard" in main
         assert "g_param_guard" in main
 
     def test_PAR001_param_status_command(self):
         """secure_boot must support 'param_status' command."""
-        main = (WSL_SECURE_BOOT / "secure_boot_main.cpp").read_text(encoding="utf-8")
+        main = _wsl_read(f"{WSL_SECURE_BOOT}/secure_boot_main.cpp")
         assert "param_status" in main
 
     def test_PAR001_audit_event_on_violation(self):
         """ComplianceParamGuard must publish audit events on violations."""
-        cpp = (WSL_SECURE_BOOT / "ComplianceParamGuard.cpp").read_text(encoding="utf-8")
+        cpp = _wsl_read(f"{WSL_SECURE_BOOT}/ComplianceParamGuard.cpp")
         assert "security_audit_event" in cpp
         assert "EVENT_PARAM_CHANGE" in cpp
 
     def test_PAR001_guard_registers_violation_callback(self):
         """ComplianceParamGuard must register a violation callback."""
-        cpp = (WSL_SECURE_BOOT / "ComplianceParamGuard.cpp").read_text(encoding="utf-8")
+        cpp = _wsl_read(f"{WSL_SECURE_BOOT}/ComplianceParamGuard.cpp")
         assert "param_set_compliance_violation_cb" in cpp
 
 
@@ -271,36 +328,36 @@ class TestPAR001_ZeroWindowProtection:
 
     def test_PAR001_compliance_check_h_exists(self):
         """compliance_check.h must exist in the parameters library."""
-        assert (WSL_PARAMETERS / "compliance_check.h").exists()
+        assert _wsl_exists(f"{WSL_PARAMETERS}/compliance_check.h")
 
     def test_PAR001_compliance_check_cpp_exists(self):
         """compliance_check.cpp must exist in the parameters library."""
-        assert (WSL_PARAMETERS / "compliance_check.cpp").exists()
+        assert _wsl_exists(f"{WSL_PARAMETERS}/compliance_check.cpp")
 
     def test_PAR001_compliance_check_in_cmake(self):
         """compliance_check.cpp must be in the parameters CMakeLists.txt."""
-        cmake = (WSL_PARAMETERS / "CMakeLists.txt").read_text(encoding="utf-8")
+        cmake = _wsl_read(f"{WSL_PARAMETERS}/CMakeLists.txt")
         assert "compliance_check.cpp" in cmake
 
     def test_PAR001_param_h_declares_protection(self):
         """param.h must declare param_is_compliance_protected."""
-        header = (WSL_PARAMETERS / "param.h").read_text(encoding="utf-8")
+        header = _wsl_read(f"{WSL_PARAMETERS}/param.h")
         assert "param_is_compliance_protected" in header
 
     def test_PAR001_param_set_has_guard(self):
         """param_set_internal must block writes to protected params."""
-        cpp = (WSL_PARAMETERS / "parameters.cpp").read_text(encoding="utf-8")
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/parameters.cpp")
         assert "param_is_compliance_protected" in cpp
         assert "param_notify_compliance_violation" in cpp
 
     def test_PAR001_param_get_has_override(self):
         """param_get must return compiled value for protected params."""
-        cpp = (WSL_PARAMETERS / "parameters.cpp").read_text(encoding="utf-8")
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/parameters.cpp")
         assert "param_get_compliance_value" in cpp
 
     def test_PAR001_param_reset_has_guard(self):
         """param_reset_internal must skip protected params."""
-        cpp = (WSL_PARAMETERS / "parameters.cpp").read_text(encoding="utf-8")
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/parameters.cpp")
         # Check that compliance protection is checked in reset context
         pattern = r'param_reset_internal.*?param_is_compliance_protected'
         assert re.search(pattern, cpp, re.DOTALL), \
@@ -308,25 +365,25 @@ class TestPAR001_ZeroWindowProtection:
 
     def test_PAR001_param_reset_all_skips_protected(self):
         """param_reset_all_internal must skip protected params in loop."""
-        cpp = (WSL_PARAMETERS / "parameters.cpp").read_text(encoding="utf-8")
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/parameters.cpp")
         pattern = r'param_reset_all_internal.*?param_is_compliance_protected.*?continue'
         assert re.search(pattern, cpp, re.DOTALL), \
             "param_reset_all_internal must skip protected params"
 
     def test_PAR001_mavlink_handler_checks_protection(self):
         """MAVLink PARAM_SET handler must check compliance protection."""
-        cpp = (WSL_MAVLINK / "mavlink_parameters.cpp").read_text(encoding="utf-8")
+        cpp = _wsl_read(f"{WSL_MAVLINK}/mavlink_parameters.cpp")
         assert "param_is_compliance_protected" in cpp
         assert "MAV_PARAM_ERROR_READ_ONLY" in cpp
 
     def test_PAR001_compliance_check_has_bitset_cache(self):
         """compliance_check.cpp must use AtomicBitset for O(1) lookups."""
-        cpp = (WSL_PARAMETERS / "compliance_check.cpp").read_text(encoding="utf-8")
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.cpp")
         assert "AtomicBitset" in cpp
 
     def test_PAR001_compliance_check_has_stubs(self):
         """compliance_check.cpp must have no-op stubs when secure_boot is disabled."""
-        cpp = (WSL_PARAMETERS / "compliance_check.cpp").read_text(encoding="utf-8")
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.cpp")
         assert "CONFIG_MODULES_SECURE_BOOT" in cpp
         # Stubs must return false / -1 (no protection when module not enabled)
         assert "return false" in cpp
@@ -334,11 +391,11 @@ class TestPAR001_ZeroWindowProtection:
 
     def test_PAR001_compliance_check_includes_table(self):
         """compliance_check.cpp must include compliance_params.h."""
-        cpp = (WSL_PARAMETERS / "compliance_check.cpp").read_text(encoding="utf-8")
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.cpp")
         assert 'compliance_params.h' in cpp
 
     def test_PAR001_cmake_has_include_path(self):
         """Parameters CMakeLists.txt must add secure_boot include path."""
-        cmake = (WSL_PARAMETERS / "CMakeLists.txt").read_text(encoding="utf-8")
+        cmake = _wsl_read(f"{WSL_PARAMETERS}/CMakeLists.txt")
         assert "CONFIG_MODULES_SECURE_BOOT" in cmake
         assert "secure_boot" in cmake

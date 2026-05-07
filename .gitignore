@@ -38,6 +38,7 @@ htmlcov/
 # PX4 build artifacts (build inside WSL, not tracked here)
 # =============================================================
 firmware/build/
+build_artifacts/
 *.px4
 *.elf
 *.bin
