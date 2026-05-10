@@ -1651,6 +1651,145 @@ RSA-3072 references) completed in the same batch.
 
 ---
 
+### ADR-017 — secure_boot module crypto bring-up on app firmware (2026-05-10, deferred decision)
+
+**Status:** Open. Decision deferred pending the trade-off below. Code
+state: nothing landed; working tree is reverted to pre-session.
+
+**Context.** Until 2026-05-10, the `secure_boot` PX4 module had been
+authored, unit-tested on host, and validated in SITL — but had never
+been compiled into a CubeOrange+ app firmware image. The flag
+`CONFIG_MODULES_SECURE_BOOT=y` was missing from
+`boards/cubepilot/cubeorangeplus/default.px4board`. Adding that flag,
+together with the libtomcrypt include path the pickup memory said was
+the only other prerequisite, surfaced a chain of integration gaps that
+none of host tests, SITL builds, or the existing bootloader build
+exercise.
+
+**The dependency chain we discovered (in build-failure order).**
+
+1. **Stack frame overflow in `SecurityAuditLogger::_updateLogSignature`.**
+   libtomcrypt's `rsa_key` is a 5-`mp_int` aggregate, and TomsFastMath's
+   `mp_int` is a fixed-size struct (~3.4 KB). With `prng_state` and
+   `hash_state` also stack-allocated, the function frame totals ~18.9 KB
+   — overshooting NuttX's `-Wframe-larger-than=2048` by ~9.2×. The
+   POSIX/SITL build did not catch this because OpenSSL's `EVP_PKEY` API
+   heap-allocates internally. Fix shape: move `rsa_key key` and
+   `prng_state prng` to function-local `static` storage (the method is
+   driven serially by a single `px4::WorkItem`, so non-reentrant
+   storage is safe; ~17 KB relocates from work-queue stack to BSS).
+   This is a real defect that would have surfaced regardless of the
+   bring-up question.
+
+2. **libtomcrypt header path missing.** The PX4 module build context
+   does not run `Make.defs`, so `<tomcrypt.h>` is unresolved. Fix:
+   `target_include_directories(modules__secure_boot PRIVATE
+   ${PX4_SOURCE_DIR}/src/lib/crypto/libtomcrypt/src/headers)`. (Note:
+   `target_link_libraries` PUBLIC propagation does *not* satisfy this
+   for the target shape `px4_add_module` produces — explicit include is
+   required.)
+
+3. **libtomcrypt CMake target undefined.** `src/lib/crypto/CMakeLists.txt`
+   is gated `if(DEFINED PX4_CRYPTO)`. `PX4_CRYPTO` is set only when
+   `CONFIG_BOARD_CRYPTO=y` is in the board config. The bootloader sets
+   it; app fw does not. Without the gate triggered, the `libtomcrypt`
+   and `libtommath` targets are never created, so
+   `target_link_libraries(modules__secure_boot PRIVATE libtomcrypt
+   libtommath)` resolves to bare `-llibtomcrypt -llibtommath` flags
+   that the linker cannot satisfy.
+
+4. **PX4 platform-layer cascade.** Setting `CONFIG_BOARD_CRYPTO=y`
+   defines `PX4_CRYPTO`, which makes
+   `platforms/common/include/px4_platform_common/crypto.h` get included
+   transitively by every translation unit that touches the px4 layer
+   (`px4_init.cpp`, `px4_crypto.cpp`, …). That header pulls in
+   `crypto_backend_definitions.h` (requires `CONFIG_DRIVERS_SW_CRYPTO=y`)
+   and `keystore_backend_definitions.h` (requires
+   `CONFIG_DRIVERS_STUB_KEYSTORE=y`), which in turn requires
+   `CONFIG_PUBLIC_KEY0=...` in the board config pointing at a public-key
+   file. **secure_boot does not use any of these abstractions** — it
+   calls libtomcrypt directly with the manufacturer pubkey embedded via
+   our own `manufacturer_pubkey.h`. Riding the framework adds two
+   parallel key paths and ~?? KB of code.
+
+5. **`px4_random` also gated.** libtomcrypt's `sprng` PRNG calls
+   `px4_get_secure_random` provided by the `px4_random` target, which is
+   defined in `platforms/nuttx/src/px4/common/CMakeLists.txt` under the
+   same `if(DEFINED PX4_CRYPTO)` gate, and links `nuttx_crypto`.
+
+6. **NuttX kernel config.** `nuttx_crypto` is a NuttX subsystem
+   library; it is built only when `CONFIG_CRYPTO=y` is in the NuttX
+   defconfig. CubeOrange+'s `nuttx-config/nsh/defconfig` (app fw) does
+   **not** set this. The bootloader's defconfig does. Enabling the
+   subsystem on app fw is a kernel-config change requiring `make ...
+   boardconfig` regeneration.
+
+7. **PRNG choice.** libtomcrypt's `rsa_encrypt_key_ex` with
+   `LTC_PKCS_1_V1_5` requires a registered PRNG to generate padding
+   bytes. With our use case (RSA-encrypt-with-PUBLIC-key as a cheap
+   unforgeable signature variant — the security property is "only
+   manufacturer's private key can decrypt", not confidentiality), the
+   padding randomness does not affect security. A deterministic or
+   weakly-seeded PRNG is acceptable; using `sprng` ties us to layers
+   5+6 above.
+
+**FLASH context.** Last clean CubeOrange+ build (secure_boot OFF) is
+1,916,460 / 1,966,080 B (97.48 %). Each layer above adds bytes. We do
+not have a measured budget for the full bring-up; FLASH overflow is a
+plausible outcome and would force another round of PX4 module strips
+(see `project_root_cause_romfs_bootloader_bloat` memo).
+
+**Why this is an ADR rather than a fix.** Two paths have meaningfully
+different long-term consequences and the choice has not been made:
+
+- **Path α — Bypass.** Keep `secure_boot` self-contained. Either lift
+  the `if(DEFINED PX4_CRYPTO)` gates in `src/lib/crypto/CMakeLists.txt`
+  and `platforms/nuttx/src/px4/common/CMakeLists.txt` (smallest patch,
+  modifies upstream-aligned files in our fork) **or** inline the
+  required libtomcrypt + libtommath sources into a private
+  `secure_boot_crypto` library inside the module (largest patch,
+  isolated to our directory). In either sub-variant, also enable
+  `CONFIG_CRYPTO=y` in `nuttx-config/nsh/defconfig` and pick a PRNG
+  that does not require `nuttx_crypto`'s `getrandom()`. Pro: no
+  parallel key path; pro: clean conceptual separation between PX4's
+  crypto framework and our compliance module. Con: we maintain crypto
+  wiring our fork doesn't share with upstream.
+
+- **Path β — Ride PX4's framework.** Set `CONFIG_BOARD_CRYPTO=y` +
+  `CONFIG_DRIVERS_SW_CRYPTO=y` + `CONFIG_DRIVERS_STUB_KEYSTORE=y` +
+  `CONFIG_PUBLIC_KEY0=...` pointing at our manufacturer pubkey, and
+  enable `CONFIG_CRYPTO=y` in NuttX. Accept ~?? KB of framework code
+  and the existence of two parallel key paths (PX4 `keystore_backend`
+  and our embedded `manufacturer_pubkey.h`). Pro: uses PX4-blessed
+  wiring; matches the pattern the audited reference-style audits expect. Con:
+  bigger FLASH cost on a 97.48 %-full image; con: two key paths
+  invite drift.
+
+**Decision.** Deferred. To be made before the next attempt at landing
+secure_boot on hardware. Resume from a clean working tree and a chosen
+path; do not re-discover this chain mid-build.
+
+**What this does change:**
+
+- The pickup-memory line *"libtomcrypt symbols should already be in
+  NuttX's libcrypto.a so no link-time change should be needed"* is
+  retired. That is true for the **bootloader** build (which sets
+  `CONFIG_BOARD_CRYPTO=y` so `BOARD_CRYPTO=tomcrypt` injects the
+  symbols), not for app fw.
+- Layer 1 (`SecurityAuditLogger` frame-size) is a real defect
+  independent of this decision and should land regardless.
+- Whichever path is chosen, `CONFIG_MODULES_SECURE_BOOT=y` cannot land
+  by itself — it co-lands with the chosen crypto bring-up.
+
+**What this does NOT change:**
+
+- ADR-001 through ADR-016 are unaffected. The bring-up is a **build
+  integration** problem, not an architecture change. The chain of
+  trust, key model, signing scheme, and bootstrap-trust mechanism are
+  all unchanged.
+
+---
+
 ## 13. Residual risks (acknowledged)
 
 The architecture defends against software-level attacks and
