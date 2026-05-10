@@ -111,7 +111,7 @@ Hash the firmware .text section at runtime using linker symbols `_stext/_etext`
 The .text section includes code AND .rodata (read-only data, including
 compiled compliance parameter values from PAR001).
 - **Implementation:** `FirmwareIntegrityChecker::_verify_code_hash()` — libtomcrypt SHA-256
-- **Pipeline:** `--code-bin` option hashes extracted .text section from ELF
+- **Pipeline:** `--elf` option hashes the FLASH range `[_stext .. _compliance_params_start)` (ADR-018; supersedes `--code-bin`, kept with deprecation warning)
 - **SITL:** Stubbed (returns true) — no flash to hash in simulation
 - **Status:** Code complete, pending first hardware build and test
 
@@ -122,7 +122,7 @@ that gets copied to RAM at boot — NOT the SD card parameter file (which change
 legitimately during calibration). Security-critical parameters are statically compiled
 into .rodata (covered by POST002's code hash).
 - **Implementation:** `FirmwareIntegrityChecker::_verify_data_hash()` — libtomcrypt SHA-256
-- **Pipeline:** `--data-bin` option hashes extracted .data section from ELF
+- **Pipeline:** `--elf` option hashes the FLASH range `[_compliance_params_start .. _compliance_params_end)` (ADR-018; supersedes `--data-bin`, kept with deprecation warning)
 - **SITL:** Stubbed (returns true)
 - **Status:** Code complete, pending first hardware build and test
 

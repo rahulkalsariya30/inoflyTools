@@ -16,11 +16,13 @@ USAGE (SITL):
   python tools/pipeline.py firmware.px4 --output-dir release/
 
 USAGE (Hardware — CubeOrange+):
-  # In WSL, extract ELF sections:
-  #   arm-none-eabi-objcopy -O binary --only-section=.text firmware.elf code.bin
-  #   arm-none-eabi-objcopy -O binary --only-section=.data firmware.elf data.bin
+  # ADR-018: pass the firmware ELF directly. The host hashes the same FLASH
+  # byte ranges the FC POST does (between _stext and _compliance_params_*).
   python tools/pipeline.py firmware.px4 --board-id 1063 \\
-      --code-bin code.bin --data-bin data.bin --version 1.0.0
+      --elf build/.../cubepilot_cubeorangeplus_default.elf --version 1.0.0
+
+  # The legacy --code-bin/--data-bin two-file flow still works (with a
+  # DeprecationWarning) but cannot reproduce the FC byte ranges.
 """
 
 import json
@@ -62,6 +64,7 @@ def run_pipeline(
     output_dir: Path,
     firmware_version: str = "",
     board_id: int = None,
+    elf_path: Path = None,
     code_bin_path: Path = None,
     data_bin_path: Path = None,
     private_key_path: Path = PRIVATE_KEY,
@@ -85,8 +88,9 @@ def run_pipeline(
         output_dir:       Directory for all output files
         firmware_version: Override version string (default: read from .px4)
         board_id:         Override board ID (default: read from .px4)
-        code_bin_path:    Path to extracted .text section binary (hardware mode)
-        data_bin_path:    Path to extracted .data section binary (hardware mode)
+        elf_path:         Path to firmware ELF (hardware mode, ADR-018)
+        code_bin_path:    DEPRECATED: extracted .text section binary
+        data_bin_path:    DEPRECATED: extracted .data section binary
         private_key_path: Manufacturer private key
         public_key_path:  Manufacturer public key
         verbose:          Print progress to stdout
@@ -116,12 +120,18 @@ def run_pipeline(
             print(msg)
 
     # Step 1: Checksums
-    mode = "hardware (ELF sections)" if code_bin_path else "SITL (.px4 image)"
+    if elf_path:
+        mode = "hardware (ELF — FC POST byte ranges)"
+    elif code_bin_path:
+        mode = "hardware (DEPRECATED two-file)"
+    else:
+        mode = "SITL (.px4 image)"
     log(f"[1/7] Computing SHA-256 checksums [{mode}]...")
     manifest = generate_manifest(
         px4_path,
         firmware_version=firmware_version,
         board_id=board_id,
+        elf_path=elf_path,
         code_bin_path=code_bin_path,
         data_bin_path=data_bin_path,
     )
@@ -201,10 +211,13 @@ if __name__ == "__main__":
     parser.add_argument("--version", default="", help="Firmware version string override")
     parser.add_argument("--board-id", type=int, default=None,
                         help="Override board ID (e.g. 1063 for CubeOrange+)")
+    parser.add_argument("--elf", default=None,
+                        help="Path to firmware ELF (hardware mode, ADR-018 — "
+                             "hashes the same FLASH ranges the FC POST hashes)")
     parser.add_argument("--code-bin", default=None,
-                        help="Path to extracted .text section binary (hardware mode)")
+                        help="DEPRECATED: pre-extracted .text section binary")
     parser.add_argument("--data-bin", default=None,
-                        help="Path to extracted .data section binary (hardware mode)")
+                        help="DEPRECATED: pre-extracted .data section binary")
     parser.add_argument("--private-key", default=str(PRIVATE_KEY), help="Manufacturer private key path")
     parser.add_argument("--public-key", default=str(PUBLIC_KEY), help="Manufacturer public key path")
     args = parser.parse_args()
@@ -215,6 +228,7 @@ if __name__ == "__main__":
             output_dir=Path(args.output_dir),
             firmware_version=args.version,
             board_id=args.board_id,
+            elf_path=Path(args.elf) if args.elf else None,
             code_bin_path=Path(args.code_bin) if args.code_bin else None,
             data_bin_path=Path(args.data_bin) if args.data_bin else None,
             private_key_path=Path(args.private_key),

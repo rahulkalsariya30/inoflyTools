@@ -6,11 +6,12 @@ Requirement: CHK001 - Compute checksums of firmware code part and data part sepa
 
 WHY separate code and data checksums?
   - DGCA Level 1 requires checksums for both parts independently
-  - Code part  = the compiled firmware binary (instructions + constants)
-  - Data part  = the default parameter set shipped with the firmware
-  - Keeping them separate means: if default parameters change, only the data
-    checksum changes — the code checksum stays the same, proving the firmware
-    binary itself was not touched. This matters for re-certification.
+  - Code part  = compiled firmware code + read-only data (everything except
+    the .compliance_params table)
+  - Data part  = the .compliance_params table (PAR001 protected parameters)
+  - Keeping them separate means: if a compliance parameter value changes,
+    only the data checksum changes — the code checksum stays byte-identical,
+    proving the firmware binary itself was not touched. (See ADR-018.)
 
 WHY SHA-256?
   - DGCA Level 1 specifies SHA-2 family minimum
@@ -18,22 +19,27 @@ WHY SHA-256?
     supported everywhere including PX4's libtomcrypt
 
 MODES OF OPERATION:
-  1. SITL (default): Extract image from .px4 JSON and hash it. The .px4 file
-     contains base64(zlib(firmware_bytes)). Code and data extracted from it.
+  1. SITL / dev (default): Extract image from .px4 JSON and hash it. The .px4
+     file contains base64(zlib(firmware_bytes)). Convenient for early-pipeline
+     testing; does NOT match what the FC POST hashes on real hardware.
 
-  2. Hardware (--code-bin / --data-bin): Hash pre-extracted ELF section binaries.
-     The user runs objcopy in WSL to extract .text and .data sections from the
-     ELF, then passes those binary files here. This ensures the hashes match
-     what the FC computes from flash at runtime (POST002/POST003).
+  2. Hardware (--elf): Single-input model. Pass the firmware ELF; the tool
+     reads symbols `_stext`, `_compliance_params_start`, `_compliance_params_end`
+     and hashes the same FLASH byte ranges the FC POST hashes:
+        code_hash = SHA256(flash[_stext .. _compliance_params_start])
+        data_hash = SHA256(flash[_compliance_params_start .. _compliance_params_end])
+     This guarantees host-vs-FC hash equivalence on hardware.
 
-     Extraction commands (run in WSL after building):
-       arm-none-eabi-objcopy -O binary --only-section=.text firmware.elf code.bin
-       arm-none-eabi-objcopy -O binary --only-section=.data firmware.elf data.bin
+  3. Legacy (--code-bin / --data-bin): DEPRECATED. Two pre-extracted section
+     binaries. Cannot reproduce the FC byte ranges (the FC range spans .text
+     + .rodata + .data's LMA copy, not just .text). Kept for one release with
+     a deprecation warning; will be removed.
 """
 
 import base64
 import hashlib
 import json
+import warnings
 import zlib
 from pathlib import Path
 from datetime import datetime, timezone
@@ -119,10 +125,151 @@ def compute_file_checksum(file_path: Path) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# Hardware mode (ELF) — slice FLASH byte ranges by linker symbol address
+# ---------------------------------------------------------------------------
+#
+# The FC POST (FirmwareIntegrityChecker._hash_flash_range) reads contiguous
+# FLASH bytes between three linker symbols:
+#     _stext, _compliance_params_start, _compliance_params_end.
+# These symbols are placed inside FLASH-resident sections (linker script
+# `boards/cubepilot/cubeorangeplus/nuttx-config/scripts/script.ld`), so for
+# them VMA == LMA — the symbol value is the FLASH (load) address.
+#
+# The FLASH image is the concatenation of every PT_LOAD segment's file bytes,
+# indexed by p_paddr (LMA). We rebuild that image from the ELF and slice the
+# two ranges. This is what `arm-none-eabi-objcopy -O binary` would produce,
+# without needing the toolchain on the host.
+
+_REQUIRED_SYMBOLS = ("_stext", "_compliance_params_start", "_compliance_params_end")
+
+
+def _read_elf_symbols(elf_path: Path) -> dict:
+    """Return a {name: value} dict for the symbols POST hashing depends on."""
+    # Local import: pyelftools is only needed for hardware mode.
+    from elftools.elf.elffile import ELFFile
+    from elftools.elf.sections import SymbolTableSection
+
+    found = {}
+    with open(elf_path, "rb") as f:
+        elf = ELFFile(f)
+        for section in elf.iter_sections():
+            if not isinstance(section, SymbolTableSection):
+                continue
+            for sym in section.iter_symbols():
+                if sym.name in _REQUIRED_SYMBOLS:
+                    found[sym.name] = sym.entry["st_value"]
+
+    missing = [s for s in _REQUIRED_SYMBOLS if s not in found]
+    if missing:
+        raise ValueError(
+            f"ELF {elf_path} is missing required linker symbols: {missing}. "
+            "Was it built with the .compliance_params section in the linker script?"
+        )
+    return found
+
+
+def _extract_flash_range(elf_path: Path, lma_start: int, lma_end: int) -> bytes:
+    """
+    Return FLASH bytes in the half-open address range [lma_start, lma_end),
+    reconstructed from the ELF's PT_LOAD segments. p_paddr is the load (LMA);
+    p_filesz file bytes from each segment occupy [p_paddr, p_paddr+p_filesz).
+
+    The range may span multiple PT_LOAD segments (PX4 firmware uses separate
+    segments for .text+.rodata, .data's LMA copy, .compliance_params, etc.).
+    We collect the overlapping slice from each segment, sort by address, and
+    concatenate. If the segments don't tile the requested range contiguously
+    (a gap that would be 0xff erase bytes in actual FLASH), we raise — silent
+    gap-fill would diverge from the FC's linear flash read.
+    """
+    from elftools.elf.elffile import ELFFile
+
+    if lma_end < lma_start:
+        raise ValueError(f"lma_end ({lma_end:#x}) < lma_start ({lma_start:#x})")
+
+    pieces = []  # list of (segment_lma_start, bytes-slice-of-segment-overlapping-range)
+    with open(elf_path, "rb") as f:
+        elf = ELFFile(f)
+        for seg in elf.iter_segments():
+            if seg.header.p_type != "PT_LOAD":
+                continue
+            seg_start = seg.header.p_paddr
+            seg_end = seg_start + seg.header.p_filesz
+            if seg_end <= lma_start or seg_start >= lma_end:
+                continue  # no overlap
+            overlap_start = max(seg_start, lma_start)
+            overlap_end = min(seg_end, lma_end)
+            offset = overlap_start - seg_start
+            length = overlap_end - overlap_start
+            pieces.append((overlap_start, seg.data()[offset:offset + length]))
+
+    if not pieces:
+        raise ValueError(
+            f"FLASH range [{lma_start:#x}, {lma_end:#x}) has no PT_LOAD coverage."
+        )
+
+    pieces.sort(key=lambda p: p[0])
+    out = bytearray()
+    cursor = lma_start
+    for piece_start, piece_bytes in pieces:
+        if piece_start > cursor:
+            raise ValueError(
+                f"FLASH range [{lma_start:#x}, {lma_end:#x}) has a gap at "
+                f"[{cursor:#x}, {piece_start:#x}) — no PT_LOAD covers it. "
+                "Hashing this would silently fill with bytes that diverge from "
+                "the FC's actual flash read."
+            )
+        if piece_start < cursor:
+            # Overlapping segments — should not happen in a well-formed firmware
+            # ELF, but guard anyway.
+            overlap = cursor - piece_start
+            piece_bytes = piece_bytes[overlap:]
+            piece_start = cursor
+        out.extend(piece_bytes)
+        cursor = piece_start + len(piece_bytes)
+
+    if cursor != lma_end:
+        raise ValueError(
+            f"FLASH range [{lma_start:#x}, {lma_end:#x}) ends short at "
+            f"{cursor:#x} — last PT_LOAD doesn't cover up to lma_end."
+        )
+
+    return bytes(out)
+
+
+def hash_flash_ranges_from_elf(elf_path: Path) -> tuple:
+    """
+    Compute (code_hash, data_hash) by slicing the FLASH byte ranges that the
+    FC POST hashes, directly from the ELF's PT_LOAD segments.
+
+    Returns:
+        (code_hash_hex, data_hash_hex) — both 64-char SHA-256 hex strings.
+    """
+    elf_path = Path(elf_path)
+    syms = _read_elf_symbols(elf_path)
+
+    code_bytes = _extract_flash_range(
+        elf_path, syms["_stext"], syms["_compliance_params_start"]
+    )
+    data_bytes = _extract_flash_range(
+        elf_path, syms["_compliance_params_start"], syms["_compliance_params_end"]
+    )
+
+    if len(code_bytes) == 0:
+        raise ValueError("Empty code range: _stext == _compliance_params_start")
+    # Empty data range is a real possibility (zero compliance params) — allow it.
+
+    return (
+        hashlib.sha256(code_bytes).hexdigest(),
+        hashlib.sha256(data_bytes).hexdigest(),
+    )
+
+
 def generate_manifest(
     px4_path: Path,
     firmware_version: str = "",
     board_id: int = None,
+    elf_path: Path = None,
     code_bin_path: Path = None,
     data_bin_path: Path = None,
 ) -> dict:
@@ -137,20 +284,20 @@ def generate_manifest(
       - generated_at: ISO timestamp (UTC)
       - algorithm: always "SHA-256" — documents what was used
 
-    For hardware builds (when code_bin_path/data_bin_path are provided):
-      - code_checksum = SHA-256 of the .text section binary (matches POST002)
-      - data_checksum = SHA-256 of the .data section binary (matches POST003)
-
-    For SITL builds (default):
-      - code_checksum = SHA-256 of the image from .px4 file
-      - data_checksum = SHA-256 of parameter_xml from .px4 file
+    Mode selection (highest priority first):
+      1. elf_path           — hardware mode. Hashes the same FLASH byte ranges
+                              the FC POST does. This is what real signing uses.
+      2. code_bin_path /
+         data_bin_path      — DEPRECATED two-file mode. Emits a warning.
+      3. (default)          — SITL mode: hashes the .px4 image and parameter_xml.
 
     Args:
         px4_path:       Path to the .px4 firmware file
         firmware_version: Override version string
         board_id:       Override board ID (default: read from .px4)
-        code_bin_path:  Path to extracted .text section binary (hardware mode)
-        data_bin_path:  Path to extracted .data section binary (hardware mode)
+        elf_path:       Path to firmware ELF (hardware mode)
+        code_bin_path:  Path to extracted .text section binary (DEPRECATED)
+        data_bin_path:  Path to extracted .data section binary (DEPRECATED)
     """
     with open(px4_path, "r") as f:
         firmware_meta = json.load(f)
@@ -161,15 +308,27 @@ def generate_manifest(
     # Board ID: explicit override > .px4 metadata > 0
     manifest_board_id = board_id if board_id is not None else firmware_meta.get("board_id", 0)
 
-    # Compute checksums: hardware mode (ELF sections) or SITL mode (.px4 image)
-    if code_bin_path is not None:
-        code_hash = compute_file_checksum(code_bin_path)
+    if elf_path is not None:
+        # Hardware mode: hash the same FLASH ranges the FC POST hashes.
+        if code_bin_path is not None or data_bin_path is not None:
+            raise ValueError(
+                "--elf cannot be combined with --code-bin/--data-bin; pick one mode."
+            )
+        code_hash, data_hash = hash_flash_ranges_from_elf(elf_path)
+    elif code_bin_path is not None or data_bin_path is not None:
+        warnings.warn(
+            "--code-bin/--data-bin is deprecated and will be removed; use --elf "
+            "to hash the same FLASH ranges the FC POST hashes (ADR-018).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        code_hash = (compute_file_checksum(code_bin_path)
+                     if code_bin_path is not None else compute_code_checksum(px4_path))
+        data_hash = (compute_file_checksum(data_bin_path)
+                     if data_bin_path is not None else compute_data_checksum(px4_path))
     else:
+        # SITL mode: hash the .px4 image and embedded parameter_xml.
         code_hash = compute_code_checksum(px4_path)
-
-    if data_bin_path is not None:
-        data_hash = compute_file_checksum(data_bin_path)
-    else:
         data_hash = compute_data_checksum(px4_path)
 
     manifest = {
@@ -207,10 +366,13 @@ if __name__ == "__main__":
     parser.add_argument("--version", default="", help="Firmware version string (optional)")
     parser.add_argument("--board-id", type=int, default=None,
                         help="Override board ID (default: read from .px4)")
+    parser.add_argument("--elf", default=None,
+                        help="Path to firmware ELF (hardware mode — hashes the "
+                             "same FLASH ranges the FC POST hashes)")
     parser.add_argument("--code-bin", default=None,
-                        help="Path to extracted .text section binary (hardware mode)")
+                        help="DEPRECATED: pre-extracted .text section binary")
     parser.add_argument("--data-bin", default=None,
-                        help="Path to extracted .data section binary (hardware mode)")
+                        help="DEPRECATED: pre-extracted .data section binary")
     parser.add_argument("--output", default="", help="Output path for manifest JSON (optional)")
     args = parser.parse_args()
 
@@ -219,9 +381,13 @@ if __name__ == "__main__":
         print(f"[ERROR] File not found: {px4_path}")
         exit(1)
 
+    elf_path = Path(args.elf) if args.elf else None
     code_bin = Path(args.code_bin) if args.code_bin else None
     data_bin = Path(args.data_bin) if args.data_bin else None
 
+    if elf_path and not elf_path.exists():
+        print(f"[ERROR] ELF not found: {elf_path}")
+        exit(1)
     if code_bin and not code_bin.exists():
         print(f"[ERROR] Code binary not found: {code_bin}")
         exit(1)
@@ -229,12 +395,18 @@ if __name__ == "__main__":
         print(f"[ERROR] Data binary not found: {data_bin}")
         exit(1)
 
-    mode = "hardware (ELF sections)" if code_bin else "SITL (.px4 image)"
+    if elf_path:
+        mode = "hardware (ELF — FC POST byte ranges)"
+    elif code_bin or data_bin:
+        mode = "hardware (DEPRECATED two-file)"
+    else:
+        mode = "SITL (.px4 image)"
     print(f"Computing checksums for: {px4_path.name}  [{mode}]")
     manifest = generate_manifest(
         px4_path,
         firmware_version=args.version,
         board_id=args.board_id,
+        elf_path=elf_path,
         code_bin_path=code_bin,
         data_bin_path=data_bin,
     )
