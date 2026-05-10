@@ -1795,10 +1795,35 @@ different long-term consequences and the choice has not been made:
   vendored copy remains in-tree as dead weight under our config (no
   functional impact, mild source-tree duplication).
 
-**Decision.** **Path γ chosen 2026-05-10.** Cleanest of the three
-because it modifies no upstream-aligned PX4 file (only board-specific
-nsh/defconfig + module-internal code). Paths α and β remain documented
-above for the audit trail.
+**Decision (2026-05-10, revised twice the same day).** Path γ was
+chosen first, attempted, and **ruled out** by an empirical link-order
+failure: PX4's `platforms/nuttx/CMakeLists.txt:373-385` places
+`${module_libraries}` (where `secure_boot.a` ends up) **after**
+`-Wl,--end-group`, while `NuttX/apps/libapps.a` (containing the
+NuttX-apps libtomcrypt) is *inside* the group. Module-side references
+to `sha256_init`, `rsa_import`, etc. emerge after the group has been
+processed, and `ld` does not re-enter the group, so `libapps.a`'s
+libtomcrypt members never get pulled in — the link fails with two
+dozen `undefined reference` errors. PX4's existing crypto path
+(`PX4_CRYPTO`) works because it places `liblibtomcrypt.a` /
+`liblibtommath.a` *after* the modules in `module_libraries`, where
+left-to-right resolution succeeds. Path γ's "headers only via
+NuttX-apps" idea was sound; the symbol-resolution mechanism is what
+breaks. **Path α-gate-lift is the chosen direction** — lift the two
+`if(DEFINED PX4_CRYPTO)` gates in `src/lib/crypto/CMakeLists.txt`
+and `platforms/nuttx/src/px4/common/CMakeLists.txt` so PX4's
+already-correct link order (modules → libtomcrypt) takes over,
+without dragging in `keystore_backend` / `sw_crypto` / `STUB_KEYSTORE`
+that Path β would. Path α-isolated remains a fallback if maintaining
+the gate-lift carries an unexpected cost.
+
+**Secondary lesson — stale CMakeCache trap.** `kconfig.cmake:380`
+sets `PX4_CRYPTO` with `CACHE INTERNAL ... FORCE`, but only inside
+`if(CRYPTO)`. If `CONFIG_BOARD_CRYPTO=n` is set after a prior build
+where it was `y`, CMake does *not* clear the cached `PX4_CRYPTO=1`
+— the `FORCE` only applies when the conditional fires. Any future
+attempt to disable PX4_CRYPTO requires `rm -rf build/<config>/`.
+Worth a project-memory entry; not unique to this work.
 
 **What this does change:**
 
