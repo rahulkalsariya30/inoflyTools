@@ -91,6 +91,15 @@ def _read_header():
     return _wsl_read(f"{WSL_SECURE_BOOT}/compliance_params.h")
 
 
+def _read_table_source():
+    """Read compliance_params.cpp — where the COMPLIANCE_PARAMS[] table now
+    lives (moved from the header in ADR-018, code/data hash split). The
+    section attribute on the definition forces the table into the dedicated
+    .compliance_params flash section; only one .cpp can hold it.
+    """
+    return _wsl_read(f"{WSL_SECURE_BOOT}/compliance_params.cpp")
+
+
 def _strip_comments(content):
     """Remove C block comments (/* ... */) to avoid matching examples."""
     return re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
@@ -160,16 +169,30 @@ class TestPAR001_HeaderExists:
         content = _read_header()
         assert "#pragma once" in content
 
-    def test_PAR001_header_has_table(self):
-        """Header must define the COMPLIANCE_PARAMS table."""
-        content = _read_header()
-        assert "COMPLIANCE_PARAMS[]" in content
+    def test_PAR001_header_declares_table(self):
+        """Header must forward-declare the COMPLIANCE_PARAMS table.
 
-    def test_PAR001_header_has_auto_count(self):
-        """COMPLIANCE_PARAM_COUNT must be auto-calculated from table size."""
+        The table itself lives in compliance_params.cpp (ADR-018) so that
+        a single definition can be tagged into the .compliance_params flash
+        section. The header carries only the extern declaration.
+        """
         content = _read_header()
+        assert "extern const compliance_param_def_t COMPLIANCE_PARAMS[]" in content
+        assert "extern const size_t" in content and "COMPLIANCE_PARAM_COUNT" in content
+
+    def test_PAR001_table_source_has_auto_count(self):
+        """COMPLIANCE_PARAM_COUNT must be auto-calculated from table size
+        in compliance_params.cpp (no hand-maintained literal)."""
+        content = _read_table_source()
         assert "sizeof(COMPLIANCE_PARAMS)" in content, \
-            "COMPLIANCE_PARAM_COUNT should use sizeof for auto-calculation"
+            "COMPLIANCE_PARAM_COUNT should be derived via sizeof, not a literal"
+
+    def test_PAR001_table_in_compliance_params_section(self):
+        """Definition must carry the .compliance_params section attribute
+        so the linker places it where POST003 / data_hash hashes it."""
+        content = _read_table_source()
+        assert 'section(".compliance_params")' in content, \
+            "COMPLIANCE_PARAMS[] must use __attribute__((section(\".compliance_params\")))"
 
 
 class TestPAR001_RequiredParameters:
@@ -177,35 +200,35 @@ class TestPAR001_RequiredParameters:
 
     def test_PAR001_has_max_altitude(self):
         """Table must include a max altitude parameter."""
-        entries = _parse_table_entries(_read_header())
+        entries = _parse_table_entries(_read_table_source())
         px4_names = [e[0] for e in entries]
         assert "GF_MAX_VER_DIST" in px4_names, \
             "Missing max altitude (GF_MAX_VER_DIST)"
 
     def test_PAR001_has_max_speed(self):
         """Table must include a max speed parameter."""
-        entries = _parse_table_entries(_read_header())
+        entries = _parse_table_entries(_read_table_source())
         px4_names = [e[0] for e in entries]
         assert "MPC_XY_VEL_MAX" in px4_names, \
             "Missing max speed (MPC_XY_VEL_MAX)"
 
     def test_PAR001_has_fence_range(self):
         """Table must include a fence range parameter."""
-        entries = _parse_table_entries(_read_header())
+        entries = _parse_table_entries(_read_table_source())
         px4_names = [e[0] for e in entries]
         assert "GF_MAX_HOR_DIST" in px4_names, \
             "Missing fence range (GF_MAX_HOR_DIST)"
 
     def test_PAR001_has_frame_type(self):
         """Table must include a frame type parameter."""
-        entries = _parse_table_entries(_read_header())
+        entries = _parse_table_entries(_read_table_source())
         px4_names = [e[0] for e in entries]
         assert "SYS_AUTOSTART" in px4_names, \
             "Missing frame type (SYS_AUTOSTART)"
 
     def test_PAR001_minimum_param_count(self):
         """Table must have at least 4 entries (DGCA minimum)."""
-        entries = _parse_table_entries(_read_header())
+        entries = _parse_table_entries(_read_table_source())
         assert len(entries) >= 4, \
             f"Expected at least 4 protected parameters, found {len(entries)}"
 
@@ -215,37 +238,37 @@ class TestPAR001_ValueRanges:
 
     def test_PAR001_altitude_positive(self):
         """Max altitude must be positive."""
-        values = _parse_table_values(_read_header())
+        values = _parse_table_values(_read_table_source())
         assert "GF_MAX_VER_DIST" in values
         assert values["GF_MAX_VER_DIST"] > 0, "Altitude must be > 0"
 
     def test_PAR001_altitude_reasonable(self):
         """Max altitude must be <= 500m (reasonable for most drones)."""
-        values = _parse_table_values(_read_header())
+        values = _parse_table_values(_read_table_source())
         assert values["GF_MAX_VER_DIST"] <= 500.0, \
             "Altitude > 500m seems unreasonable"
 
     def test_PAR001_speed_positive(self):
         """Max speed must be positive."""
-        values = _parse_table_values(_read_header())
+        values = _parse_table_values(_read_table_source())
         assert "MPC_XY_VEL_MAX" in values
         assert values["MPC_XY_VEL_MAX"] > 0, "Speed must be > 0"
 
     def test_PAR001_speed_reasonable(self):
         """Max speed must be <= 50 m/s (reasonable for most drones)."""
-        values = _parse_table_values(_read_header())
+        values = _parse_table_values(_read_table_source())
         assert values["MPC_XY_VEL_MAX"] <= 50.0, \
             "Speed > 50 m/s seems unreasonable"
 
     def test_PAR001_fence_range_positive(self):
         """Fence range must be positive."""
-        values = _parse_table_values(_read_header())
+        values = _parse_table_values(_read_table_source())
         assert "GF_MAX_HOR_DIST" in values
         assert values["GF_MAX_HOR_DIST"] > 0, "Fence range must be > 0"
 
     def test_PAR001_frame_type_valid(self):
         """Frame type (SYS_AUTOSTART) must be a positive ID."""
-        values = _parse_table_values(_read_header())
+        values = _parse_table_values(_read_table_source())
         assert "SYS_AUTOSTART" in values
         assert values["SYS_AUTOSTART"] > 0, \
             "Frame type must be a valid airframe ID"
@@ -256,14 +279,14 @@ class TestPAR001_TableFormat:
 
     def test_PAR001_entries_have_descriptions(self):
         """Every table entry must have a human-readable description."""
-        entries = _parse_table_entries(_read_header())
+        entries = _parse_table_entries(_read_table_source())
         for px4_name, description in entries:
             assert len(description) > 0, \
                 f"Parameter {px4_name} has empty description"
 
     def test_PAR001_entries_have_types(self):
         """Every table entry must specify COMPLIANCE_TYPE_FLOAT or INT32."""
-        content = _read_header()
+        content = _read_table_source()
         entries = _parse_table_entries(content)
         for px4_name, _ in entries:
             # Find the type for this entry in the table
@@ -273,7 +296,7 @@ class TestPAR001_TableFormat:
 
     def test_PAR001_no_duplicate_params(self):
         """No parameter should appear twice in the table."""
-        entries = _parse_table_entries(_read_header())
+        entries = _parse_table_entries(_read_table_source())
         px4_names = [e[0] for e in entries]
         assert len(px4_names) == len(set(px4_names)), \
             f"Duplicate parameters found: {px4_names}"

@@ -191,16 +191,22 @@ class TestPAIR001ComplianceParam:
 
     @pytest.fixture
     def compliance_header(self):
-        """Read compliance_params.h from PX4 source (WSL path)."""
+        """Read compliance_params.cpp from PX4 source (WSL path).
+
+        ADR-018 moved the COMPLIANCE_PARAMS[] table from the header into
+        compliance_params.cpp so a single definition can be tagged into the
+        .compliance_params flash section. The fixture name is kept as
+        `compliance_header` for compatibility — it now returns the .cpp.
+        """
         import subprocess
         result = subprocess.run(
             ["wsl", "-e", "bash", "-c",
-             "cat ~/PX4-Autopilot/src/modules/secure_boot/compliance_params.h"],
+             "cat ~/PX4-Autopilot/src/modules/secure_boot/compliance_params.cpp"],
             capture_output=True
         )
         if result.returncode == 0:
             return result.stdout.decode("utf-8", errors="replace")
-        pytest.skip("Cannot read compliance_params.h from WSL")
+        pytest.skip("Cannot read compliance_params.cpp from WSL")
 
     def test_PAIR001_compliance_param_exists(self, compliance_header):
         """MAV_SIGN_CFG must be listed in the compliance parameter table."""
@@ -220,7 +226,7 @@ class TestPAIR001ComplianceParam:
                 context = "\n".join(lines[max(0, i-1):i+3])
                 assert "COMPLIANCE_TYPE_INT32" in context
                 break
-        assert found_param, "MAV_SIGN_CFG not found in compliance_params.h"
+        assert found_param, "MAV_SIGN_CFG not found in compliance_params.cpp"
 
     def test_PAIR001_compliance_param_description(self, compliance_header):
         """MAV_SIGN_CFG entry must have a description."""
