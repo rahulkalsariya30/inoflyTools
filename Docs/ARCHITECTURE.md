@@ -1765,9 +1765,40 @@ different long-term consequences and the choice has not been made:
   bigger FLASH cost on a 97.48 %-full image; con: two key paths
   invite drift.
 
-**Decision.** Deferred. To be made before the next attempt at landing
-secure_boot on hardware. Resume from a clean working tree and a chosen
-path; do not re-discover this chain mid-build.
+- **Path γ — NuttX-apps libtomcrypt (chosen 2026-05-10).** PX4 ships
+  the Apache NuttX `nuttx-apps/crypto/libtomcrypt` port in its NuttX
+  submodule (`platforms/nuttx/NuttX/apps/crypto/libtomcrypt/`) but
+  leaves it disabled in every PX4 board defconfig. Enabling
+  `CONFIG_CRYPTO_LIBTOMCRYPT=y` (which auto-selects
+  `CONFIG_MATH_LIBTOMMATH=y`) in the board's `nuttx-config/nsh/defconfig`
+  causes the apps build to fetch libtomcrypt 1.18.2 once, build it
+  into NuttX's app library, and inject `<tomcrypt.h>` into CFLAGS +
+  CXXFLAGS for *all* PX4 module compilation via that port's
+  `Make.defs`. This sidesteps PX4's `PX4_CRYPTO`-gated copy in
+  `src/lib/crypto/libtomcrypt/` entirely. Layers 2 (include path), 3
+  (PX4_CRYPTO gate), 4 (PX4 platform-layer crypto.h cascade), and 5
+  (`px4_random` gate) of the 7-layer chain all collapse — none of the
+  files those layers touch are modified. Layer 1 (frame size) is an
+  independent defect. Layer 6 (`CONFIG_CRYPTO=y`) is not actually
+  needed under Path γ — that flag exposes NuttX's `/dev/crypto`
+  device interface, which is a separate kernel-side abstraction from
+  the user-space libtomcrypt library; secure_boot calls libtomcrypt
+  directly. Layer 7 (PRNG choice) remains: register a self-contained
+  PRNG (yarrow or fortuna) inside secure_boot rather than `sprng`,
+  whose `LTC_PKCS_1_V1_5` callback chain otherwise pulls
+  `getrandom()` → `nuttx_crypto` (i.e., back into the PX4 platform
+  crypto cascade). Pro: zero upstream-aligned PX4 file edits; pro:
+  one libtomcrypt copy actually links (the NuttX-apps one); pro:
+  PX4's vendored copy under `src/lib/crypto/libtomcrypt/` stays
+  inert. Con: build-time download dependency on libtomcrypt 1.18.2
+  zip from GitHub (one-time, cached by the apps build); con: PX4's
+  vendored copy remains in-tree as dead weight under our config (no
+  functional impact, mild source-tree duplication).
+
+**Decision.** **Path γ chosen 2026-05-10.** Cleanest of the three
+because it modifies no upstream-aligned PX4 file (only board-specific
+nsh/defconfig + module-internal code). Paths α and β remain documented
+above for the audit trail.
 
 **What this does change:**
 
