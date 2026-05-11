@@ -144,8 +144,8 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | **Attack** | Attacker modifies safety-critical parameters (max altitude, geofence, speed limits) |
 | **Impact** | Drone operates outside certified flight envelope — safety hazard |
 | **Likelihood** | Medium (GCS parameter write is unprotected by default) |
-| **Mitigations** | PAR001 (signature-gated writes to protected parameters) |
-| **Residual risk** | Currently HIGH — PAR001 not yet implemented |
+| **Mitigations** | PAR001 (static **ceiling** baked into firmware in `.compliance_params` flash table covered by `data_hash`; runtime cap-semantics — operator can set any value ≤ ceiling but cannot exceed it; over-cap attempts audit-logged via LOG001; values not persisted across reboots; pre-arm gate. ADR-019.) |
+| **Residual risk** | Low — ceiling cannot be raised without re-flashing manufacturer-signed firmware (any change to `.compliance_params` shifts `data_hash` and fails POST003). Operator-side risk (setting an in-cap value that is unsafe for the specific mission) is outside the scope of PAR001 — covered by operator training and post-flight telemetry-log review. |
 
 ### T7 — MAVLink telemetry spoofing
 

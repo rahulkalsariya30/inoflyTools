@@ -54,24 +54,34 @@ exact pass criterion.
   rejected with `Preflight Fail: Firmware integrity check failed`. A
   `POST_RESULT` audit entry is written with the failure detail.
 
-## 6. PAR001 — protected parameter writes blocked (zero-window)
+## 6. PAR001 — cap-semantics enforced (ADR-019)
 
 - **Covers:** PAR001
-- **Action:** for each parameter in the canonical 6-list:
-  - `GF_MAX_VER_DIST`, `GF_MAX_HOR_DIST`, `MPC_XY_VEL_MAX`,
-    `SYS_AUTOSTART`, `CA_AIRFRAME`, `MAV_SIGN_CFG`
-  - From `pxh>`: `param set <NAME> <bogus value>`
-- **Pass:** every write returns `READ_ONLY`. `param show <NAME>` returns
-  the compiled value. MAVLink `PARAM_SET` from QGC returns
-  `MAV_PARAM_ERROR_READ_ONLY`.
+- **Action:** for each parameter in the canonical 6-list
+  (`GF_MAX_VER_DIST`, `GF_MAX_HOR_DIST`, `MPC_XY_VEL_MAX`,
+  `SYS_AUTOSTART`, `CA_AIRFRAME`, `MAV_SIGN_CFG`):
+  1. `param show <NAME>` immediately after boot → expect **0**.
+  2. `param set <NAME> <value above ceiling>` → expect rejection
+     with the ceiling included in the error message.
+  3. `param set <NAME> <value at ceiling>` → expect accept.
+  4. `param set <NAME> <value just below ceiling>` → expect accept;
+     `param show <NAME>` returns that value.
+  5. `param save` then reboot → `param show <NAME>` returns 0 again
+     (autosave-skip works; values do not persist).
+  6. With at least one compliance param still 0, attempt to arm →
+     pre-arm rejects with the offending param name in the message.
 
-## 7. PAR001 — violations logged to audit log
+## 7. PAR001 — over-cap violations logged to audit log
 
 - **Covers:** PAR001 + LOG001 wiring
-- **Action:** after step 6, inspect the live audit log via QGC Audit Log
-  panel.
-- **Pass:** one `PARAM_CHANGE` entry per blocked write, sequence numbers
+- **Action:** after step 6 (the over-cap rejection in 6.2), inspect
+  the live audit log via QGC Audit Log panel.
+- **Pass:** one `COMPLIANCE_PARAM_VIOLATION` entry per over-cap
+  attempt with the ceiling value in the message, sequence numbers
   monotonically increasing, signed (`audit_log.sig` regenerated).
+  Successful within-cap sets from step 6.3/6.4 produce **no** audit
+  entry — that is by design (ADR-019: audit log records security
+  events only).
 
 ## 8. PAIR001 — MAVLink signing required
 
@@ -83,7 +93,8 @@ exact pass criterion.
   3. Connect QGC with the **right** passphrase → confirm full link.
 - **Pass:** unsigned/wrong-key messages are silently dropped on the FC
   side; correct key gives full bidirectional link. `MAV_SIGN_CFG=1` is
-  read-only (PAR001).
+  capped at its compiled ceiling (PAR001 / ADR-019 — operator can
+  set values ≤ ceiling, cannot exceed it).
 
 ## 9. Audit log — Live Events panel + auto-FTP backfill
 

@@ -86,7 +86,7 @@ requires a recorded entry in §12 and team agreement.
 | L6 | **No flash encryption (no AES-in-OTP)** for Level 1 — the audited reference-style confidentiality control is not required by DGCA Level 1 | §10, ADR-004 |
 | L7 | **libtomcrypt on NuttX (app fw + bootloader), OpenSSL on host/SITL** — both speak RSA-PSS / SHA-256 interoperably; libtomcrypt is the MCU-sized library already linked into PX4 (no new dependency). Earlier doc revisions said "mbedTLS on hardware"; that wording was always stale — the actual library is libtomcrypt. ADR-005 reworded 2026-05-07 to match. | PROJECT_NOTES.md, ADR-005 |
 | L8 | **Audit log: per-file RSA-2048 signing**, public-key encryption of SHA-256 hash | SECURITY_PLAN.md §LOG001, ADR-006, ADR-016 |
-| L9 | **Static parameter compilation** for compliance-critical params (zero-window protection) | SECURITY_PLAN.md §PAR001, ADR-007 |
+| L9 | ~~**Static parameter compilation** for compliance-critical params (zero-window protection)~~ ⚠️ **AMENDED 2026-05-11 (ADR-019).** ✅ **CURRENT:** Compiled values are interpreted as **ceilings** (cap-semantics). Operator may `param_set v` for `v ∈ (0, ceiling]`; the value lives in RAM only and is not persisted. Boot value is 0; pre-arm blocks arming until every compliance-protected param has been set above 0. Over-cap attempts raise `COMPLIANCE_PARAM_VIOLATION` with the ceiling included in the message. Static compilation of the *ceiling* into the `.compliance_params` table (covered by `data_hash`) is unchanged. | SECURITY_PLAN.md §PAR001, ADR-007, ADR-019 |
 | L10 | **MAVLink signing with `SHA256(passphrase)` key derivation** for GCS-FC pairing | SECURITY_PLAN.md §PAIR001, ADR-008 |
 | L11 | ~~**POST in app firmware on SITL; POST in bootloader on hardware** (Phase 5b)~~ ⚠️ **AMENDED 2026-05-10 (ADR-018).** ✅ **CURRENT:** POST runs in **app firmware** on both SITL and hardware. The bootloader's role is **signature verification only (BOOT001)**; the `code_hash` / `data_hash` check against the signed manifest is an app-firmware responsibility that gates arming. | SECURITY_PLAN.md §POST002/003, ADR-009, ADR-018 |
 | L12 | **Two update paths, both gated:** ~~Path A (DFU) closed by BOOT003~~; Path B (MAVLink-FTP) closed by UPD001 + BOOT001 re-verify ⚠️ **AMENDED 2026-05-04 (ADR-014).** ✅ **CURRENT:** Path A (DFU) closed by **software DFU-refuse** in the secure bootloader (ArduPilot pattern). Path B unchanged. | §8, ADR-010, ADR-014 |
@@ -599,7 +599,7 @@ the manifest and chip-identity match. Both are required.**
 | `firmware_integrity_status` uORB messages | Internal to FC; the ARM gate runs on the FC, so spoofing this message would require already-compromised firmware (and at that point the attacker has more direct attacks) |
 | MAVLink telemetry to GCS | GCS display is informational only; arming gate is on-FC, not in GCS |
 | Per-event audit log entries | The whole-file signing model (LOG001) covers integrity at log-download time; per-entry signing was rejected (DEV001 risk — would require a device-resident private key) |
-| Individual flight parameters (most) | Compliance-critical params are protected by static compilation (PAR001 zero-window protection), not by signature |
+| Individual flight parameters (most) | Compliance-critical params have a **ceiling** baked into the signed firmware (PAR001 cap-semantics, ADR-019); operator may set any value at-or-below the ceiling but cannot exceed it. Protection mechanism is the static `.compliance_params` table covered by `data_hash`, not per-parameter signatures. |
 
 ### 6.3 Where the public key is embedded
 
@@ -1278,9 +1278,20 @@ verify.
 **Rationale:** No private key on device; matches the audited reference Section 8
 audit-logging pattern; simpler manufacturer-side verification flow.
 
-### ADR-007 — Static parameter compilation for compliance-critical params (2026-04-25)
+### ADR-007 — ~~Static parameter compilation for compliance-critical params~~ (2026-04-25) ⚠️ **AMENDED 2026-05-11 by ADR-019 — enforcement model changed from zero-window to cap-semantics**
 
-**Decision:** Bake compliance-critical parameters (geofence, speed,
+> **🟡 AMENDED 2026-05-11 (ADR-019).** The original decision below
+> baked the compiled value as the runtime value (zero-window:
+> `param_set` blocked entirely for compliance-protected params).
+> ADR-019 reinterprets the compiled value as a **ceiling** —
+> operator may set any value in `(0, ceiling]`; values are not
+> persisted; boot value is 0; pre-arm blocks if any compliance
+> param is still 0. The set of protected parameters and the
+> static-compilation mechanism (the compiled ceiling lives in the
+> `.compliance_params` flash table covered by `data_hash`) are
+> unchanged. The original text is preserved below for traceability.
+
+**Decision (original, partially retired):** Bake compliance-critical parameters (geofence, speed,
 altitude, frame, sign config) into firmware binary at build time.
 Block `param_set` for these parameters at the parameter library level.
 
@@ -1288,7 +1299,7 @@ Block `param_set` for these parameters at the parameter library level.
 - Signature-gated runtime writes — rejected. Race window between sig
   check and write; larger TCB; no audit precedent in the audited reference.
 
-**Rationale:** Zero-window protection (write is rejected before any
+**Rationale (original, partially retired):** Zero-window protection (write is rejected before any
 check completes). Smaller TCB. Matches the audited reference pattern.
 
 ### ADR-008 — MAVLink signing via SHA256(passphrase) key derivation (2026-04-28)
@@ -1456,7 +1467,7 @@ security architecture as ArduPilot" story for the auditor.
 - RSA-PSS scheme (ADR-002, key size later amended to RSA-2048 by ADR-016 — orthogonal to this ADR)
 - libtomcrypt on NuttX, OpenSSL on host (ADR-005's substantive intent)
 - LOG001 per-file RSA log signing (ADR-006)
-- PAR001 static parameter compilation (ADR-007)
+- PAR001 static parameter compilation (ADR-007 — enforcement model later amended to cap-semantics by ADR-019; the `.compliance_params` flash table itself is unchanged)
 - PAIR001 MAVLink signing (ADR-008)
 - POST in app fw (SITL) and bootloader (hardware) (ADR-009) — the
   bootloader is still the verifier on hardware, just trusted via a
@@ -1991,6 +2002,138 @@ gates.
 - The bootloader's BOOT001 signature check remains the only thing
   that gates jumping into app firmware — exactly as before.
 
+### ADR-019 — PAR001 cap-semantics with boot-at-zero + pre-arm gate (2026-05-11, supersedes ADR-007)
+
+**Status:** Accepted 2026-05-11. Supersedes ADR-007 (zero-window
+protection). The set of compliance-protected parameters and the
+`.compliance_params` flash table covered by `data_hash` are
+unchanged; only the *enforcement model* changes.
+
+**Decision (three coupled parts).**
+
+1. **Cap-semantics, not zero-window.** The compiled value for each
+   compliance-protected parameter is interpreted as a **ceiling**, not
+   a frozen value. Operator `param_set v` is accepted iff `v ≤
+   ceiling`; the accepted value lives in RAM (`user_config[param]`)
+   and is what `param_get` returns and what flight code consumes.
+   `v > ceiling` is rejected with `MAV_PARAM_ERROR_VALUE_OUT_OF_RANGE`
+   (or PX4 equivalent) and a message that **includes the ceiling**:
+   *"cannot set VERT_MAX to 50.0 — compliance ceiling is 10.0"*.
+
+2. **Boot-at-zero, with a pre-arm gate.** Every compliance-protected
+   parameter boots to **0**, not to its ceiling. Operator must
+   explicitly `param_set` a value in `(0, ceiling]` for each one
+   before flight. Pre-arm check **blocks arming** if any
+   compliance-protected param is still 0. Reset / `param_reset` /
+   `param_save_default` autosave-skip all return the param to 0;
+   reboot also returns it to 0. Operator-set values **never persist
+   to flash**.
+
+3. **Audit log records violations only.** A successful operator set
+   (`v ≤ ceiling`) generates **no audit-log entry** — it is normal
+   operator action, not a security event. A rejected set
+   (`v > ceiling`) fires the existing `COMPLIANCE_PARAM_VIOLATION`
+   event into the SecurityAuditLogger (LOG001), with the ceiling
+   value included in the message. Compliance with the ceiling at
+   *flight time* is verified post-flight against the **flight
+   telemetry log** (actual altitude flown, etc.), not against the
+   audit log.
+
+**Why cap-semantics over zero-window.** Zero-window (the original
+ADR-007 design) baked the ceiling as the runtime value — operator
+could not lower it. External feedback was unanimous: a ceiling that
+the operator cannot operate below is too rigid for real missions
+(different mission profiles need different effective limits within
+the regulatory cap). Cap-semantics preserves the security property
+("operator cannot exceed the manufacturer-registered ceiling") while
+giving the operator the flexibility they actually need.
+
+**Why boot-at-zero, not boot-at-ceiling.** Safer default. Boot-at-
+ceiling means "every flight starts with the legal maximum until the
+operator dials it down" — defensible legally but a worst-case
+default behaviorally. Boot-at-zero forces an explicit, mission-
+specific operator decision before each flight. The pre-arm check
+makes "forgot to set it" a loud failure on the ground rather than a
+silent in-flight surprise.
+
+**Why no persistence.** Compliance-protected values must not survive
+across boots — otherwise an operator can set a value once, lose
+context of why, and inherit it indefinitely. Reboot-to-zero forces
+the per-flight decision every time.
+
+**Why violations-only audit logging.** The audit log is for
+*security events*, not operator telemetry. A within-cap operator
+action is not a security event; an over-cap attempt is. The flight
+telemetry log already records what was actually flown — that is the
+authoritative compliance record at audit time. Two log streams with
+different purposes; do not conflate.
+
+**Alternatives considered.**
+
+- *Keep zero-window (ADR-007 as-is).* Rejected — operator
+  inflexibility breaks real missions; external feedback unanimous.
+- *Cap with FLOOR / FROZEN policy split per parameter.* Rejected —
+  every compliance-protected parameter currently fits the CAP model
+  (ceiling on max altitude / max speed / fence range / etc.).
+  Per-parameter policy-tag adds TCB and configuration surface for no
+  current need; can be added later if a parameter genuinely needs
+  FLOOR semantics.
+- *Boot-at-ceiling.* Rejected — safer to require per-flight
+  operator confirmation than to default to legal maximum.
+- *Persist operator-set values across reboots.* Rejected — value
+  drift across operators / missions; defeats the per-flight
+  confirmation that boot-at-zero buys.
+- *Log every successful operator set.* Rejected — pollutes audit
+  log with non-security events; the flight telemetry log already has
+  this information with higher fidelity.
+
+**Implementation surface (PX4 fork — `~/PX4-Autopilot/src/lib/parameters/parameters.cpp`).**
+
+- `param_get` — return `user_config[param]` (RAM value), not the
+  compiled ceiling.
+- `param_set` — replace zero-window block with cap check; on accept,
+  update `user_config[param]`; on reject, fire
+  `COMPLIANCE_PARAM_VIOLATION` with ceiling included in message.
+- `param_reset_internal` — for compliance params, set
+  `user_config[param] = 0` (not "blocked entirely").
+- Boot init — for every compliance-protected param, seed
+  `user_config[param] = 0`.
+- `param_save_default` / autosave — skip compliance-protected params
+  so operator-set values do not persist.
+- Pre-arm hook (Commander) — block arming if any compliance-
+  protected param is currently 0; surface the param name(s) in the
+  arming-rejection message.
+
+**Tests.** All existing PAR001 tests assume zero-window and will be
+rewritten as cap-semantics tests:
+
+- Boot → expect 0 for every compliance-protected param.
+- `set v ∈ (0, ceiling]` → succeeds; runtime = `v`; **no** audit log
+  entry.
+- `set v = ceiling` → succeeds (boundary inclusive).
+- `set v > ceiling` → rejected; audit log gains a
+  `COMPLIANCE_PARAM_VIOLATION` entry whose message text includes the
+  ceiling.
+- Reboot after operator set → param is back to 0.
+- `param save` then reboot → still back to 0 (autosave-skip works).
+- `param_reset` → 0.
+- Arming with any compliance-protected param == 0 → pre-arm fail
+  with the offending param name in the rejection message.
+
+**What this does NOT change.**
+
+- The set of compliance-protected parameters (same list as today).
+- The `.compliance_params` flash table layout, the
+  `_compliance_params_start` / `_compliance_params_end` symbols, or
+  `data_hash` coverage (ADR-018 unchanged — registered ceilings
+  still live in flash, still covered by `data_hash`).
+- POST002 / POST003 / BOOT001 chain (the runtime cap check operates
+  on RAM `user_config`, which is outside the `data_hash`-covered
+  flash region).
+- Single-keypair (ADR-001), bootstrap-trust + sealing
+  (ADR-013/014/015), embedded pubkey (ADR-013), POST in app firmware
+  (ADR-018) — all unchanged.
+
 ---
 
 ## 13. Residual risks (acknowledged)
@@ -2052,7 +2195,7 @@ carry over:
 - Manifest format and signing process
 - POST logic and ARM-gate wiring
 - LOG001 audit-log signing approach
-- PAR001 static parameter compilation
+- PAR001 static parameter compilation (cap-semantics enforcement — ADR-019)
 - PAIR001 MAVLink signing
 - Manufacturer toolchain (signing, packaging, factory provisioning)
 
@@ -2083,4 +2226,5 @@ For project-specific requirement IDs (CHK001, BOOT001, etc.), see
 |---|---|---|
 | 1.0 | 2026-04-29 | Initial lockdown. Captures all architectural decisions made through ADR-012. |
 | 1.1 | 2026-04-29 | Added §5.5 (Why POST and RDP L2 are both needed) and §8.4 (How updates work on a chip locked by RDP L2 — internal-vs-external writes, WRP-locked bootloader region, factory provisioning sequence). No architectural changes; expansions of existing decisions to address common auditor questions. |
+| 1.3 | 2026-05-11 | Added ADR-019 (PAR001 cap-semantics with boot-at-zero + pre-arm gate, supersedes ADR-007 enforcement model). Marked ADR-007 as amended; updated lockdown-table row L9 (zero-window → cap-semantics with strikethrough + ✅ CURRENT block); updated §6.2 row "Individual flight parameters (most)" wording; added cross-ref note in ADR-013 "What this does NOT change" list and §14.4 future-hardware list. The set of compliance-protected parameters and the `.compliance_params`/`data_hash` chain are unchanged; only the runtime enforcement model changes from "param_set blocked" to "param_set v ≤ ceiling accepted in RAM, not persisted, boot-at-zero, pre-arm gate." |
 | 1.2 | 2026-05-04 | Partial amendment. Added amendment notice (top), flagged lockdown rows L4/L5/L12/L13 as superseded, added new lockdown rows L14/L15, marked ADR-003/010/011 with supersession pointers, appended ADR-013 (bootstrap-trust + tamper-evident sealing), ADR-014 (software DFU-refuse), ADR-015 (bl_update / ROMFS-bundled bootloader). Forcing function: CubeOrange+ has no externally accessible BOOT0 button on shipped carriers, making OTP write / RDP burn / WRP option-byte set operationally infeasible. **Convention:** retired material in §3–§11 is rendered in `~~strikethrough~~` (or a 🚫 RETIRED label for code-block diagrams that markdown won't strike) and immediately followed by an ✅ CURRENT replacement block. Sections touched: §1 (lockdown table + open-items list), §2.1, §2.2, §3.2, §4.1, §4.2, §4.3 (full strike + current), §4.4 (full strike + current), §5.1 (diagram strike + current), §5.2, §5.3, §5.4, §5.5 (entire RDP framing relabeled, all 5 failure modes amended, layers-stack diagram strike + current), §6.3, §7 (boot sequence step 4, attacker-cannot-skip steps 4 + 7), §8.1 (Path A post-state), §8.3 (gating table Path A row), §8.4 (full strike + current update flow + post-RDP regions table + Phase 5b sequence), §9.1 (auditor walk-through), §9.2 (root-of-trust + bootloader-hardening rows), §10.2 (deviation diagram strike + current), §10.3 (table cells), §10.4 (BOOT004 + OTP space note), §11 (Inofly comparison row + new ArduPilot row + key-observation paragraph), §13 (residual risks: chip-decap, dev-boards, confidentiality rows + new manufacturer-signed-malicious-bootloader-push row), §14.4 (per-chip-family change list), Appendix A→companion-docs table (RDP_BURN_RUNBOOK.md retired pointer), ADR-001 (deployment sub-claim amendment). |

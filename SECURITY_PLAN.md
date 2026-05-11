@@ -89,7 +89,7 @@ factory seal.
 | POST003| POST — verify actual data hash (NuttX)    | POST               | ✅ Code done (hw test pending) |
 | POST004| POST — verify board ID matches hardware   | POST               | ✅ Code done (hw test pending) |
 | ARM001 | Arming blocked if POST failed             | Arming Gate        | ✅ Done        |
-| PAR001 | Compliance parameter protection (static)  | Param Protection   | ✅ Done (SITL)  |
+| PAR001 | Compliance parameter protection (static ceiling + cap-semantics, ADR-019) | Param Protection   | ⏳ Cap-semantics rewrite pending; static-compilation chain unchanged |
 | LOG001 | Per-file RSA signed audit log              | Audit Logging      | ✅ Done (SITL)  |
 | UPD001 | Drone rejects unsigned firmware update    | Secure Update      | ✅ Done        |
 | PAIR001| GCS-FC pairing (MAVLink signing)          | GCS Locking        | ✅ Done (SITL)  |
@@ -134,9 +134,23 @@ read from `firmware.prototype` by CMake). For CubeOrange+: 1063.
 - **SITL:** Stubbed (returns true) — `SECURE_BOOT_BOARD_ID` not defined in SITL builds
 - **Status:** Code complete, pending first hardware build and test
 
-### PAR001 — Compliance parameter protection (static compilation)
-Safety-critical compliance parameters are **statically compiled** into the
-firmware binary. They cannot be changed from any GCS at runtime.
+### PAR001 — Compliance parameter protection (static ceiling + cap-semantics)
+
+> **Enforcement model amended 2026-05-11 (ADR-019).** Earlier wording
+> in this section described "zero-window protection" — `param_set`
+> blocked entirely for compliance-protected params. That model has
+> been replaced by **cap-semantics**: the compiled value is now a
+> *ceiling*, not a frozen value. The set of protected parameters and
+> the static-compilation mechanism (the ceiling lives in the
+> `.compliance_params` flash table covered by `data_hash`) are
+> unchanged. See ADR-019 in `Docs/ARCHITECTURE.md §12` for the full
+> rationale.
+
+Safety-critical compliance parameters have a **registered ceiling**
+statically compiled into the firmware binary. The ceiling cannot be
+changed at runtime from any GCS; the operator may set any value
+**at-or-below** the ceiling for the current flight, but values are
+not persisted across reboots.
 
 **Protected parameters** (from audited docs, Section 3.1b):
 - Max Altitude AGL → `GF_MAX_VER_DIST`
@@ -147,31 +161,62 @@ firmware binary. They cannot be changed from any GCS at runtime.
 - MAVLink Signing Mode → `MAV_SIGN_CFG` (PAIR001)
 - Additional client-specific parameters (table is extensible)
 
-**Approach — zero-window protection at the parameter library level:**
-A single table in `compliance_params.h` lists every parameter to lock
-(name, description, type, value). Protection is enforced directly in PX4's
-parameter system (`src/lib/parameters/`), not by polling:
-- `param_set_internal()` **blocks writes** to protected parameters
-- `param_get()` **returns the compiled value** for protected parameters
-- `param_reset_internal()` / `param_reset_all_internal()` **skip** protected parameters
-- MAVLink `PARAM_SET` handler returns `MAV_PARAM_ERROR_READ_ONLY` to GCS
+**Approach — cap-semantics at the parameter library level:**
+A single table in `compliance_params.h` lists every parameter to
+protect (name, description, type, **ceiling value**). Enforcement
+runs directly in PX4's parameter system (`src/lib/parameters/`), not
+by polling:
 
-Protection is active from the very first parameter access (before any
-module starts), with zero timing gap. An `AtomicBitset` cache provides
-O(1) lookup on the control loop hot path. Adding a new protected parameter
-requires only one row in `compliance_params.h` — no code changes.
+- **Boot:** every compliance-protected param is seeded to **0** in
+  `user_config[param]` (the RAM-side runtime value). The compiled
+  ceiling stays in the `.compliance_params` flash table.
+- **`param_set v`** — for a compliance-protected param:
+  - if `v ∈ (0, ceiling]`: accepted; `user_config[param] = v`; **no
+    audit-log entry** (this is normal operator action).
+  - if `v > ceiling`: rejected with
+    `MAV_PARAM_ERROR_VALUE_OUT_OF_RANGE` (or PX4 equivalent);
+    rejection message **includes the ceiling**: *"cannot set VERT_MAX
+    to 50.0 — compliance ceiling is 10.0"*; fires a
+    `COMPLIANCE_PARAM_VIOLATION` event into the SecurityAuditLogger
+    (LOG001).
+- **`param_get`** — returns the RAM-side `user_config[param]` (so
+  flight code consumes whatever the operator set for this flight),
+  *not* the compiled ceiling.
+- **`param_reset_internal` / `param_reset_all_internal`** — for
+  compliance params, set `user_config[param] = 0` (was: blocked
+  entirely under the prior zero-window model).
+- **`param_save_default` / autosave** — **skip** compliance-protected
+  params, so operator-set values never persist to flash. Reboot
+  always returns the param to 0.
+- **Pre-arm hook (Commander)** — **block arming** if any
+  compliance-protected param is currently 0; the arming-rejection
+  message names the offending param(s).
 
-`ComplianceParamGuard` (audit-only role) registers a violation callback
-for logging and provides `param_status` diagnostics.
+`ComplianceParamGuard` keeps its audit-only role: registers the
+violation callback for over-cap attempts, provides `param_status`
+diagnostics. Adding a new protected parameter still requires only
+one row in `compliance_params.h` — no code changes.
 
-**Violation logging:** Any blocked write attempt is logged as
-`EVENT_PARAM_CHANGE` via the SecurityAuditLogger (LOG001).
+**Violation logging:** *Only* over-cap `param_set` attempts are
+logged (as `COMPLIANCE_PARAM_VIOLATION` via LOG001). Successful
+within-cap operator sets are not audit-log events — the audit log
+records security events; a within-cap operator action is not one.
 
-**Why static compilation + zero-window:** This is the approach used in the
-the audited reference-audited implementation (Section 7). Eliminates the need for
-signature-gated parameter writes and provides the strongest protection —
-the values literally cannot be changed without re-flashing signed firmware.
-No timing gap, no race condition, no bypass via MAVLink/shell/BSON import.
+**Audit-log vs flight-telemetry-log distinction.** The audit log no
+longer captures what *value* the operator chose for a flight; only
+that no over-cap attempts happened. The actual altitude / speed /
+fence range flown is captured in PX4's flight telemetry log, and
+that is the authoritative compliance record at audit time. Two log
+streams with different purposes; do not conflate.
+
+**Why static compilation of the ceiling + cap-semantics:** Static
+compilation eliminates the need for signature-gated writes to the
+ceiling itself — the registered ceiling literally cannot be changed
+without re-flashing manufacturer-signed firmware (and any change to
+the `.compliance_params` table would shift `data_hash`, failing
+POST003 on the next boot). Cap-semantics on top of that gives the
+operator the per-flight flexibility real missions need, without
+weakening the regulatory ceiling.
 
 ### LOG001 — Per-file RSA signed audit log (the audited reference Section 8)
 All security events are logged to persistent storage (SD card) as 132-byte
@@ -579,9 +624,9 @@ physical anti-tamper on production avionics.
 | Sub-phase | Req ID | Description | Status |
 |-----------|--------|-------------|--------|
 | 4.1 | PAR001 | Table-driven compliance_params.h (extensible per client) | ✅ Done |
-| 4.2 | PAR001 | Zero-window protection in parameter library (param_set/get/reset blocked) | ✅ Done |
+| 4.2 | PAR001 | Cap-semantics in parameter library: param_set v ≤ ceiling accepted in RAM, > ceiling rejected, boot-at-zero, autosave-skip, pre-arm gate (ADR-019) | ⏳ Pending — code rewrite of `src/lib/parameters/parameters.cpp` + pre-arm hook |
 | 4.3 | PAR001 | Audit logging of parameter change violations | ✅ Done |
-| 4.4 | PAR001 | Tests (26 passing) + compliance mapping | ✅ Done |
+| 4.4 | PAR001 | Tests + compliance mapping | ⏳ Existing 26 zero-window tests being rewritten as cap-semantics tests (ADR-019) |
 
 ### Phase 5 — Hardware Deployment (CubeOrange+) 🔧 In Progress
 
@@ -775,7 +820,7 @@ inoflyPilot (PX4 fork — WSL2):
     manufacturer_pubkey.h
     security_manifest.h
   src/lib/parameters/
-    compliance_check.h/.cpp   (PAR001 zero-window enforcement)
+    compliance_check.h/.cpp   (PAR001 cap-semantics enforcement — ADR-019)
   src/modules/mavlink/streams/
     FIRMWARE_INTEGRITY_STATUS.hpp
   src/modules/commander/HealthAndArmingChecks/checks/
