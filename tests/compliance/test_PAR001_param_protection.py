@@ -1,16 +1,26 @@
 """
 tests/compliance/test_PAR001_param_protection.py
 
-Compliance tests for PAR001 — Compliance parameter protection (static compilation)
+Compliance tests for PAR001 — Compliance parameter protection
+(static ceiling + cap-semantics, ADR-019, supersedes ADR-007 enforcement
+model).
 
 Requirement: PAR001
-  - Safety-critical parameters must be statically compiled into firmware
-  - Parameters cannot be changed from any GCS at runtime
+  - Safety-critical parameters' ceilings are statically compiled into
+    firmware in the .compliance_params flash table covered by data_hash
+  - Operator may param_set v for v in (0, ceiling]; values live in RAM
+    only and are not persisted across reboots
+  - Boot value is 0; pre-arm blocks arming until every compliance param
+    has been set above 0 (Commander ComplianceParamCheck)
+  - Over-cap attempts (v > ceiling, or v <= 0) are rejected and routed
+    through the violation callback for LOG001 audit logging, with
+    attempted+ceiling included in the detail field
   - compliance_params.h must define all required DGCA parameters
-  - Values must be within safe/sane ranges
+  - Values (ceilings) must be within safe/sane ranges
   - Table-driven: adding a parameter requires only editing the header
 
-Reference: the audited reference-audited compliance document, Sections 3.1(b) and 7
+Reference: the audited reference-audited compliance document Sections 3.1(b) and 7;
+Docs/ARCHITECTURE.md ADR-019 for the cap-semantics rationale.
 """
 
 import re
@@ -27,6 +37,9 @@ WSL_PX4_SRC = "$HOME/PX4-Autopilot/src"
 WSL_SECURE_BOOT = f"{WSL_PX4_SRC}/modules/secure_boot"
 WSL_PARAMETERS = f"{WSL_PX4_SRC}/lib/parameters"
 WSL_MAVLINK = f"{WSL_PX4_SRC}/modules/mavlink"
+WSL_COMMANDER_CHECKS = (
+    f"{WSL_PX4_SRC}/modules/commander/HealthAndArmingChecks/checks"
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -40,10 +53,14 @@ def _wsl_available():
     these tests should skip cleanly there.
     """
     try:
+        # 30s, not 10 — WSL cold-start (first call after the VM idles
+        # out) routinely takes 12–20s on Windows hosts. A 10s timeout
+        # here was masking a cold WSL as "not available" and silently
+        # skipping the entire suite.
         result = subprocess.run(
             ["wsl", "-e", "bash", "-c", "true"],
             capture_output=True,
-            timeout=10,
+            timeout=30,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -346,8 +363,8 @@ class TestPAR001_EnforcementCode:
         assert "param_set_compliance_violation_cb" in cpp
 
 
-class TestPAR001_ZeroWindowProtection:
-    """PAR001: zero-window protection must be wired into PX4 parameter library."""
+class TestPAR001_CapSemanticsProtection:
+    """PAR001 cap-semantics (ADR-019) must be wired into PX4 parameter library."""
 
     def test_PAR001_compliance_check_h_exists(self):
         """compliance_check.h must exist in the parameters library."""
@@ -367,37 +384,121 @@ class TestPAR001_ZeroWindowProtection:
         header = _wsl_read(f"{WSL_PARAMETERS}/param.h")
         assert "param_is_compliance_protected" in header
 
-    def test_PAR001_param_set_has_guard(self):
-        """param_set_internal must block writes to protected params."""
-        cpp = _wsl_read(f"{WSL_PARAMETERS}/parameters.cpp")
-        assert "param_is_compliance_protected" in cpp
-        assert "param_notify_compliance_violation" in cpp
+    def test_PAR001_api_exposes_cap_semantics_helpers(self):
+        """compliance_check.h must expose the cap-semantics helpers
+        (ADR-019): ceiling getter, cap check, pre-arm helper. The
+        legacy zero-window getter (param_get_compliance_value) must be
+        gone — no caller should still depend on the old name."""
+        header = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.h")
+        assert "param_get_compliance_ceiling" in header
+        assert "param_check_within_cap" in header
+        assert "param_compliance_first_unset" in header
+        assert "param_get_compliance_value" not in header, (
+            "Legacy zero-window getter must be removed (ADR-019)"
+        )
 
-    def test_PAR001_param_get_has_override(self):
-        """param_get must return compiled value for protected params."""
+    def test_PAR001_param_set_uses_cap_check(self):
+        """param_set_internal must use the cap check, not a blanket
+        block, for compliance-protected params (ADR-019). The new
+        violation notifier carries (name, attempted, param) — the
+        old single-arg call signature must be gone."""
         cpp = _wsl_read(f"{WSL_PARAMETERS}/parameters.cpp")
-        assert "param_get_compliance_value" in cpp
+        assert "param_check_within_cap" in cpp, (
+            "param_set must call param_check_within_cap (ADR-019)"
+        )
+        assert "param_notify_compliance_violation(param_name(param), val, param)" in cpp, (
+            "Violation notifier must carry attempted+param for audit detail"
+        )
 
-    def test_PAR001_param_reset_has_guard(self):
-        """param_reset_internal must skip protected params."""
+    def test_PAR001_param_get_lazy_zeroes_unset_compliance_params(self):
+        """param_get must return 0 for compliance-protected params that
+        the operator has not yet set this flight (boot-at-zero, ADR-019).
+        The legacy 'return the compiled value' branch must be gone."""
         cpp = _wsl_read(f"{WSL_PARAMETERS}/parameters.cpp")
-        # Check that compliance protection is checked in reset context
-        pattern = r'param_reset_internal.*?param_is_compliance_protected'
-        assert re.search(pattern, cpp, re.DOTALL), \
-            "param_reset_internal must check compliance protection"
+        assert "param_get_compliance_value" not in cpp, (
+            "Legacy zero-window get-override must be removed (ADR-019)"
+        )
+        # Lazy-zero pattern: compliance-protected AND !user_config.contains
+        pattern = (
+            r'param_is_compliance_protected\(param\)\s*&&\s*'
+            r'!user_config\.contains\(param\)'
+        )
+        assert re.search(pattern, cpp), (
+            "param_get must lazy-zero compliance params not yet set "
+            "in user_config (ADR-019 boot-at-zero)"
+        )
 
-    def test_PAR001_param_reset_all_skips_protected(self):
-        """param_reset_all_internal must skip protected params in loop."""
+    def test_PAR001_param_reset_no_longer_blocks_compliance(self):
+        """Under cap-semantics (ADR-019), reset is allowed for
+        compliance-protected params — clearing user_config makes the
+        param read back as 0 via the lazy-zero path. The old 'reset is
+        blocked' guard must be gone from param_reset_internal."""
         cpp = _wsl_read(f"{WSL_PARAMETERS}/parameters.cpp")
-        pattern = r'param_reset_all_internal.*?param_is_compliance_protected.*?continue'
-        assert re.search(pattern, cpp, re.DOTALL), \
-            "param_reset_all_internal must skip protected params"
+        # The legacy guard returned `false` immediately for protected
+        # params before touching user_config. Make sure no such early
+        # return exists in the param_reset_internal body.
+        m = re.search(
+            r'static int param_reset_internal\([^)]*\)\s*\{(.*?)\n\}',
+            cpp, re.DOTALL,
+        )
+        assert m, "param_reset_internal not found"
+        body = m.group(1)
+        assert "return false" not in body or "param_is_compliance_protected" not in body, (
+            "param_reset_internal must not early-return on compliance "
+            "protection under cap-semantics (ADR-019)"
+        )
 
-    def test_PAR001_mavlink_handler_checks_protection(self):
-        """MAVLink PARAM_SET handler must check compliance protection."""
+    def test_PAR001_param_reset_all_no_longer_skips_compliance(self):
+        """Under cap-semantics, reset_all also resets compliance params
+        to 0 (lazy-zero). The old `continue` skip must be gone."""
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/parameters.cpp")
+        pattern = (
+            r'param_reset_all_internal[^{]*\{[^}]*'
+            r'param_is_compliance_protected[^}]*continue'
+        )
+        assert not re.search(pattern, cpp, re.DOTALL), (
+            "param_reset_all_internal must not skip compliance params "
+            "under cap-semantics (ADR-019)"
+        )
+
+    def test_PAR001_param_export_skips_compliance(self):
+        """Operator-set values for compliance params must NEVER persist
+        across reboots — autosave-skip is enforced inside
+        param_export_internal so the export loop omits them (ADR-019)."""
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/parameters.cpp")
+        m = re.search(
+            r'static int param_export_internal\([^)]*\)\s*\{(.*?)\n\}',
+            cpp, re.DOTALL,
+        )
+        assert m, "param_export_internal not found"
+        body = m.group(1)
+        assert "param_is_compliance_protected" in body and "continue" in body, (
+            "param_export_internal must skip compliance-protected "
+            "params so they don't persist across reboots (ADR-019)"
+        )
+
+    def test_PAR001_mavlink_handler_routes_through_cap_check(self):
+        """MAVLink PARAM_SET handler must call param_set (which runs the
+        cap check) and surface a cap-violation rejection as
+        VALUE_OUT_OF_RANGE — not the legacy upfront READ_ONLY block."""
         cpp = _wsl_read(f"{WSL_MAVLINK}/mavlink_parameters.cpp")
-        assert "param_is_compliance_protected" in cpp
-        assert "MAV_PARAM_ERROR_READ_ONLY" in cpp
+        # Compliance-protected branch must use OUT_OF_RANGE under
+        # cap-semantics, not READ_ONLY.
+        # (READ_ONLY may still appear elsewhere in the file for
+        # _HASH_CHECK or unrelated reasons; we only assert the
+        # compliance-protected branch uses OUT_OF_RANGE.)
+        compliance_block = re.search(
+            r'param_is_compliance_protected[^}]+}',
+            cpp, re.DOTALL,
+        )
+        assert compliance_block is not None, (
+            "MAVLink handler must reference param_is_compliance_protected "
+            "for the cap-violation surfacing path"
+        )
+        assert "MAV_PARAM_ERROR_VALUE_OUT_OF_RANGE" in compliance_block.group(0), (
+            "Compliance cap-violation must surface as VALUE_OUT_OF_RANGE "
+            "(ADR-019), not the legacy READ_ONLY"
+        )
 
     def test_PAR001_compliance_check_has_bitset_cache(self):
         """compliance_check.cpp must use AtomicBitset for O(1) lookups."""
@@ -408,7 +509,6 @@ class TestPAR001_ZeroWindowProtection:
         """compliance_check.cpp must have no-op stubs when secure_boot is disabled."""
         cpp = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.cpp")
         assert "CONFIG_MODULES_SECURE_BOOT" in cpp
-        # Stubs must return false / -1 (no protection when module not enabled)
         assert "return false" in cpp
         assert "return -1" in cpp
 
@@ -422,3 +522,94 @@ class TestPAR001_ZeroWindowProtection:
         cmake = _wsl_read(f"{WSL_PARAMETERS}/CMakeLists.txt")
         assert "CONFIG_MODULES_SECURE_BOOT" in cmake
         assert "secure_boot" in cmake
+
+
+class TestPAR001_PreArmGate:
+    """PAR001 cap-semantics adds a pre-arm gate (ADR-019): arming is
+    blocked until every compliance-protected parameter has been set
+    above 0. The check lives in the Commander HealthAndArmingChecks
+    framework alongside firmwareIntegrityCheck."""
+
+    def test_PAR001_pre_arm_check_files_exist(self):
+        """complianceParamCheck.{cpp,hpp} must exist."""
+        assert _wsl_exists(f"{WSL_COMMANDER_CHECKS}/complianceParamCheck.cpp")
+        assert _wsl_exists(f"{WSL_COMMANDER_CHECKS}/complianceParamCheck.hpp")
+
+    def test_PAR001_pre_arm_check_in_cmake(self):
+        """complianceParamCheck.cpp must be in the HealthAndArmingChecks CMakeLists."""
+        cmake = _wsl_read(
+            f"{WSL_PX4_SRC}/modules/commander/HealthAndArmingChecks/CMakeLists.txt"
+        )
+        assert "complianceParamCheck.cpp" in cmake
+
+    def test_PAR001_pre_arm_check_registered(self):
+        """ComplianceParamCheck must be registered in HealthAndArmingChecks.hpp."""
+        hpp = _wsl_read(
+            f"{WSL_PX4_SRC}/modules/commander/HealthAndArmingChecks/"
+            "HealthAndArmingChecks.hpp"
+        )
+        assert '#include "checks/complianceParamCheck.hpp"' in hpp
+        assert "ComplianceParamCheck _compliance_param_checks" in hpp
+        assert "&_compliance_param_checks" in hpp
+
+    def test_PAR001_pre_arm_check_uses_first_unset_helper(self):
+        """The pre-arm check must drive its decision off
+        param_compliance_first_unset() — not its own table walk —
+        so the source of truth stays in compliance_check.cpp."""
+        cpp = _wsl_read(f"{WSL_COMMANDER_CHECKS}/complianceParamCheck.cpp")
+        assert "param_compliance_first_unset" in cpp
+
+    def test_PAR001_pre_arm_check_publishes_audit_event(self):
+        """When pre-arm fails, the check must publish a security audit
+        event (LOG001) on transition into the BLOCKED state — once,
+        not on every commander tick."""
+        cpp = _wsl_read(f"{WSL_COMMANDER_CHECKS}/complianceParamCheck.cpp")
+        assert "security_audit_event" in cpp
+        assert "EVENT_ARMING_BLOCKED" in cpp
+
+    def test_PAR001_pre_arm_check_includes_param_name_in_message(self):
+        """The mavlink_log message must identify which compliance
+        parameter is unset so the operator knows what to fix."""
+        cpp = _wsl_read(f"{WSL_COMMANDER_CHECKS}/complianceParamCheck.cpp")
+        assert "first_unset" in cpp
+        assert "mavlink_log_critical" in cpp
+
+
+class TestPAR001_ViolationDetailFormat:
+    """ADR-019: the violation callback carries an
+    `attempted=X ceiling=Y` detail string into the audit log so the
+    operator can see (post-flight) what value was attempted and what
+    the registered ceiling was."""
+
+    def test_PAR001_callback_signature_carries_details(self):
+        """compliance_violation_cb_t must take (name, details) — the
+        legacy single-arg signature is gone."""
+        header = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.h")
+        # The typedef line must include both params.
+        m = re.search(
+            r'typedef\s+void\s*\(\*compliance_violation_cb_t\)\(([^)]*)\)',
+            header,
+        )
+        assert m, "compliance_violation_cb_t typedef not found"
+        params = m.group(1)
+        assert "param_name" in params and "details" in params, (
+            f"Callback must take (name, details); got: {params}"
+        )
+
+    def test_PAR001_violation_notifier_formats_attempted_and_ceiling(self):
+        """compliance_check.cpp must format both attempted and ceiling
+        into the detail string passed to the callback."""
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.cpp")
+        assert "attempted=" in cpp and "ceiling=" in cpp, (
+            "Violation detail must include attempted+ceiling (ADR-019)"
+        )
+
+    def test_PAR001_guard_writes_details_to_audit_event(self):
+        """ComplianceParamGuard.cpp must copy the details string into
+        the security_audit_event_s::detail field — otherwise the
+        attempted+ceiling info never reaches audit_log.bin."""
+        cpp = _wsl_read(f"{WSL_SECURE_BOOT}/ComplianceParamGuard.cpp")
+        # Callback signature wired through:
+        assert "onViolation(const char *param_name, const char *details)" in cpp
+        # Details is composed into evt.detail somehow:
+        assert "details" in cpp and "evt.detail" in cpp
