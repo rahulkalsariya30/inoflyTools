@@ -286,23 +286,34 @@ With physical USB access, an attacker can today flash arbitrary firmware.
 The bootloader becomes the verification authority for both paths:
 
 ```
-On every boot (POST):
-  1. Bootloader uses its embedded RSA-2048 manufacturer pubkey
-     (compiled into the bootloader binary — ADR-013)
-  2. Bootloader hashes app firmware in flash (SHA-256)
-  3. Bootloader verifies firmware signature using embedded pubkey
-  4. PASS → jump to app firmware
-     FAIL → refuse to launch, log to flash, show error indicator
+On every boot — split responsibility (ADR-018):
+
+  Bootloader (BOOT001 — signature check only):
+    1. Bootloader uses its embedded RSA-2048 manufacturer pubkey
+       (compiled into the bootloader binary — ADR-013)
+    2. Bootloader hashes app firmware in flash (SHA-256)
+    3. Bootloader verifies firmware signature using embedded pubkey
+    4. PASS → jump to app firmware
+       FAIL → refuse to launch, log to flash, show error indicator
+
+  App firmware (POST002/POST003 — code/data hash check):
+    5. App firmware recomputes code_hash and data_hash over the FLASH
+       ranges [_stext .. _compliance_params_start) and
+       [_compliance_params_start .. _compliance_params_end)
+    6. Compares against the signed manifest's code_hash / data_hash
+    7. PASS → publish firmware_integrity_status OK; arming allowed
+       FAIL → refuse to arm, log violation to audit log
 
 On firmware update (Path B — MAVLink-FTP):
   1. Running firmware receives signed bundle (existing UPD001 flow)
   2. Verifies signature → writes to staging region → reboots
-  3. Bootloader runs POST on new firmware before launch
+  3. Bootloader sig-verifies new firmware before jumping (BOOT001);
+     app firmware then runs the POST002/003 hash check (ADR-018)
 
 On firmware update (Path A — DFU):
   - Production secure bootloader: software-refuses DFU mode entry (BOOT005)
-  - Dev builds (no DFU-refuse): firmware lands in flash, but POST in
-    bootloader fails sig-check on next boot → won't run
+  - Dev builds (no DFU-refuse): firmware lands in flash, but the
+    bootloader's BOOT001 signature check fails on next boot → won't run
 ```
 
 **Implementation:**

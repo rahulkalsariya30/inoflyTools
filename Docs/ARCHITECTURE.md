@@ -88,7 +88,7 @@ requires a recorded entry in §12 and team agreement.
 | L8 | **Audit log: per-file RSA-2048 signing**, public-key encryption of SHA-256 hash | SECURITY_PLAN.md §LOG001, ADR-006, ADR-016 |
 | L9 | **Static parameter compilation** for compliance-critical params (zero-window protection) | SECURITY_PLAN.md §PAR001, ADR-007 |
 | L10 | **MAVLink signing with `SHA256(passphrase)` key derivation** for GCS-FC pairing | SECURITY_PLAN.md §PAIR001, ADR-008 |
-| L11 | **POST in app firmware on SITL; POST in bootloader on hardware** (Phase 5b) | SECURITY_PLAN.md §Phase 5b, ADR-009 |
+| L11 | ~~**POST in app firmware on SITL; POST in bootloader on hardware** (Phase 5b)~~ ⚠️ **AMENDED 2026-05-10 (ADR-018).** ✅ **CURRENT:** POST runs in **app firmware** on both SITL and hardware. The bootloader's role is **signature verification only (BOOT001)**; the `code_hash` / `data_hash` check against the signed manifest is an app-firmware responsibility that gates arming. | SECURITY_PLAN.md §POST002/003, ADR-009, ADR-018 |
 | L12 | **Two update paths, both gated:** ~~Path A (DFU) closed by BOOT003~~; Path B (MAVLink-FTP) closed by UPD001 + BOOT001 re-verify ⚠️ **AMENDED 2026-05-04 (ADR-014).** ✅ **CURRENT:** Path A (DFU) closed by **software DFU-refuse** in the secure bootloader (ArduPilot pattern). Path B unchanged. | §8, ADR-010, ADR-014 |
 | L13 | ~~**RDP Level 2 mandatory for production units** (not for dev boards / SITL audit demos)~~ ⚠️ **SUPERSEDED 2026-05-04 (ADR-013).** ✅ **CURRENT:** production units are protected by **tamper-evident seal** (airframe + Cube enclosure) + **serial-number tracking** (STM32 96-bit UID + seal serial recorded at manufacture) + **RMA inspection workflow**. | §5, ADR-011, ADR-013 |
 | L14 | **Tamper-evident sealing on airframe + Cube enclosure** for production units (compensating control for the physical-attacker class formerly handled by RDP L2) | ADR-013, MANUFACTURING_RUNBOOK.md (deliverable) |
@@ -1308,15 +1308,23 @@ the same key.
 SHA-256 derivation is stronger than the audited reference's 8-byte UID; simple operator
 flow (one passphrase shared between provisioning tool and QGC).
 
-### ADR-009 — POST in app firmware (SITL) and bootloader (hardware) (2026-04-29)
+### ADR-009 — ~~POST in app firmware (SITL) and bootloader (hardware)~~ (2026-04-29) ⚠️ **SUPERSEDED 2026-05-10 by ADR-018**
 
-**Decision:** SITL has no bootloader, so POST runs in the application
+> **🟡 SUPERSEDED 2026-05-10 (ADR-018).** The original decision below
+> proposed migrating POST into the bootloader on hardware. ADR-018
+> retires that plan: POST stays in app firmware on both SITL and
+> hardware; the bootloader does signature verification only (BOOT001).
+> See ADR-018 for the full reasoning (signature-vs-hash-check
+> responsibility split, bootloader sector-0 budget, failure-mode
+> story). The original text is preserved below for traceability.
+
+**Decision (original, retired):** SITL has no bootloader, so POST runs in the application
 firmware on SITL. On hardware (CubeOrange+), POST moves into the
 bootloader (Phase 5b). The application firmware retains its POST
 module for `firmware_integrity_status` publication and ARM-gate
 wiring.
 
-**Rationale:** SITL does not simulate a bootloader; running POST in
+**Rationale (original, retired):** SITL does not simulate a bootloader; running POST in
 app firmware on SITL preserves end-to-end testability. Hardware POST
 in bootloader is required to gate firmware launch (the bootloader is
 the only entity that runs before firmware).
@@ -1843,6 +1851,145 @@ Worth a project-memory entry; not unique to this work.
   integration** problem, not an architecture change. The chain of
   trust, key model, signing scheme, and bootstrap-trust mechanism are
   all unchanged.
+
+### ADR-018 — Code/data hash split, `--elf` host hashing, POST stays in app firmware (2026-05-10, supersedes ADR-009)
+
+**Status:** Accepted 2026-05-10. Supersedes ADR-009.
+
+**Decision (three coupled parts).**
+
+1. **Code/data hash split is a FLASH-range split, not a section
+   split.** The signed manifest contains two SHA-256 digests:
+   - `code_hash = SHA256(flash[_stext .. _compliance_params_start))`
+     — everything in FLASH from the start of the image up to (but
+     not including) the compliance-params table. Covers `.text`,
+     `.rodata`, the LMA copy of `.data`, vector table — the entire
+     code part as the FC sees it on real flash.
+   - `data_hash = SHA256(flash[_compliance_params_start .. _compliance_params_end))`
+     — exactly the `.compliance_params` table (the PAR001 protected
+     parameters), nothing else.
+
+   The two ranges are contiguous and non-overlapping. A change to a
+   compliance param value moves only `data_hash`; the firmware code
+   itself is provably untouched by the unchanged `code_hash`. This is
+   the per-part checksum granularity DGCA Level 1 requires.
+
+2. **`--elf` is the canonical host hashing mode for hardware**
+   (`tools/checksum/checksum.py`, `tools/pipeline.py`). The host tool
+   reads `_stext`, `_compliance_params_start`, `_compliance_params_end`
+   from the ELF symbol table, reconstructs the FLASH image from the
+   ELF's `PT_LOAD` segments (indexed by `p_paddr`), and slices the same
+   two byte ranges the FC POST hashes on boot. This guarantees
+   host-vs-FC hash equivalence by construction, not by convention.
+
+   The legacy `--code-bin / --data-bin` two-file mode is retained for
+   one release with a `DeprecationWarning` and is scheduled for
+   removal — it cannot reproduce the FC byte ranges (the FC range
+   spans `.text + .rodata + .data`'s LMA copy, not just `.text`).
+
+3. **POST stays in app firmware on both SITL and hardware.** The
+   bootloader (BOOT001) does **signature verification only** —
+   RSA-PSS / SHA-256 over the app firmware blob against the embedded
+   manufacturer pubkey. The hash check (manifest `code_hash` /
+   `data_hash` vs. live FLASH) is unambiguously an **application
+   firmware** responsibility, surfaced via `firmware_integrity_status`
+   and gating arming.
+
+**Rationale.**
+
+For (1): The signature alone is one digest over the whole signed
+blob — it does not satisfy DGCA's per-part requirement, and it gives
+no operational handle to distinguish "param table tampered" from
+"code tampered." Splitting at the `.compliance_params` section
+boundary is the smallest split that produces this signal, aligns with
+the reference implementations audit precedent, and is implementable purely with
+linker symbols (no extra section bookkeeping).
+
+For (2): The original `--code-bin / --data-bin` design assumed
+section binaries could stand in for FLASH ranges. They can't. PX4
+firmware ELFs have multiple `PT_LOAD` segments (the LMA copy of
+`.data` lives in its own segment), and the FC reads contiguous flash
+addresses, not section binaries. `--elf` is the only host-side
+representation that is byte-identical to what the FC computes —
+verified this session against `arm-none-eabi-objcopy -O binary` on
+the real `cubepilot_cubeorangeplus_default.elf`.
+
+For (3) — and this is the part that supersedes ADR-009: ADR-009
+proposed moving POST into the bootloader on hardware, on the theory
+that the bootloader is the only entity that runs before app firmware.
+We retire that plan. Reasons:
+- Signature verification (already in the bootloader) is what gates
+  *launch*; the hash check is a *granularity* control, not a
+  launch-gate. A signature-verified firmware *running* its own POST
+  and refusing to arm is functionally equivalent to a bootloader
+  POST, with strictly less code in the TCB.
+- POST already exists, is tested, and runs in app firmware in SITL.
+  Duplicating the logic into the bootloader doubles the maintenance
+  surface for no security gain — both copies would need
+  `code_hash`/`data_hash` parity, both would need linker-symbol
+  parity, both would need libtomcrypt builds tracked.
+- Bootloader sector-0 size budget is the binding constraint
+  (ADR-016). Adding the hash-comparison code path there competes
+  for the same bytes RSA-PSS already needs.
+- Failure-mode story is cleaner: signature mismatch → bootloader
+  refuses to jump (binary, terminal). Hash mismatch → app firmware
+  comes up, publishes status, refuses to arm, logs the event with
+  enough context to triage. Splitting them between two layers makes
+  the error-surface clearer for the auditor and for the operator.
+
+**Linker-symbol contract.** This ADR assumes — and the host tool
+asserts — that the cubeorangeplus linker script
+(`boards/cubepilot/cubeorangeplus/nuttx-config/scripts/script.ld`)
+emits all three of `_stext`, `_compliance_params_start`,
+`_compliance_params_end` and that they fall inside FLASH-resident
+sections where VMA == LMA. Any future port to a different MCU/board
+must replicate this contract or the host tool will refuse the ELF.
+
+**Per-entry struct size note.** `compliance_param_def_t` contains two
+`const char*` pointers, an enum, and a small union. Pointer width
+differs between targets, so the same 6 entries occupy different
+totals in `.compliance_params`:
+- Cortex-M7 (cubeorangeplus): **6 entries × 16 B = 96 B**
+- x86_64 (SITL): **6 entries × 24 B = 144 B**
+
+This is not a discrepancy — it is intrinsic to the struct shape on
+two ABIs. The host tool always reads the symbols from the *target*
+ELF being signed, so the manifest `data_hash` is always computed
+against the byte layout the FC will see.
+
+**SITL caveat.** SITL ELFs do not emit `_stext` /
+`_compliance_params_*` (those symbols are NuttX-linker-script-only),
+so `--elf` is not applicable to SITL. SITL continues to use the
+`.px4` JSON path where `code_hash` is over the embedded image and
+`data_hash` is over the embedded `parameter_xml`. This is sufficient
+for SITL because the FC body is stubbed under `__PX4_POSIX` (returns
+true) — the SITL hashes are reproducibility checks, not flight
+gates.
+
+**Consequences and obligations.**
+
+- Retire ADR-009. L11 in §1 is updated accordingly.
+- SECURITY_PLAN.md POST002/POST003 sections must reference `--elf`
+  and ADR-018 (already done in the same change set).
+- "POST will move into the bootloader for Phase 5b" wording is
+  retired everywhere (PROJECT_NOTES.md, SECURITY_PLAN.md Phase 5b table,
+  ARCHITECTURE.md L11 + ADR-009).
+- Phase 5b deliverables for POST in the bootloader (any line item
+  about bootloader hash check) are removed; only the BOOT001
+  signature check, BOOT005 DFU-refuse, BOOT006 `bl_update`, and
+  BOOT007 sealing remain.
+- Removing `--code-bin / --data-bin` is scheduled for the release
+  after this one. Deprecation warning is live now; downstream callers
+  have one release to migrate.
+
+**What this does NOT change.**
+
+- Single-keypair model (ADR-001), signing scheme (RSA-PSS / SHA-256 /
+  salt 32 — ADR-002+ADR-016), bootstrap-trust + sealing chain
+  (ADR-013/014/015), `bl_update` install path (ADR-015), and
+  libtomcrypt-on-NuttX / OpenSSL-on-host (ADR-005) are unchanged.
+- The bootloader's BOOT001 signature check remains the only thing
+  that gates jumping into app firmware — exactly as before.
 
 ---
 
