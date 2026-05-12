@@ -2284,6 +2284,313 @@ tests unchanged. New:
 - SecurityAuditLogger wiring, ADR-019 CAPPED semantics, single
   keypair, bootstrap-trust, POST-in-app-fw — all unchanged.
 
+### ADR-021 — PAIR001 signing key stays on SD card; SD-card-bake replaces firmware-bake (2026-05-12, supersedes the 2026-05-09 "PAIR001 v2 bake" plan)
+
+**Status:** Accepted 2026-05-12. Supersedes the 2026-05-09 internal
+plan to bake a per-drone MAVLink signing key into the firmware binary
+("PAIR001 v2 bake"). PAIR001's user-visible behavior is unchanged —
+the same `SHA256(passphrase)`-derived 32-byte key still authenticates
+the GCS-FC link. Only the *storage location* and *protection mechanism*
+of the key file change.
+
+**Decision.** The per-drone MAVLink signing key remains on the SD card
+at `/fs/microsd/mavlink/mavlink-signing-key.bin` (the path PX4's
+`mavlink_sign_control` already uses; written by
+`provision_signing_key.py --hardware-mount <sd>` at the factory). It is
+protected by **two compensating controls** working together:
+
+| Control | Threat closed | Status |
+|---|---|---|
+| **BOOT007 tamper-evident seal** (airframe + Cube enclosure) | Physical access — SD card removal, USB console (nsh) `cat`, SWD/JTAG memory read | Already required for BOOT001/005/006 chain of trust; no new mechanism |
+| **MAVLink FTP `_validatePath` deny** on the signing-key path | Remote read/write/list of the key file over MAVLink FTP | New, ~5 lines in `src/modules/mavlink/mavlink_ftp.cpp` |
+
+Provisioning continues to use the unchanged factory flow:
+`tools/provisioning/provision_signing_key.py` writes the key file
+directly to the SD card before the airframe is sealed.
+
+**Why this supersedes the firmware-bake plan.**
+
+The 2026-05-09 plan baked a unique per-drone signing key into each
+unit's firmware binary, motivated by removing the SD-card file from
+the attack surface entirely. Two reasons that plan is now retired:
+
+1. **DGCA Gazette §7.1 does not require PAIR001 specifically.**
+   The regulation requires *a* GCS-FC authentication mechanism, not
+   a specific storage location for the key material. With the
+   compensating controls above, the on-SD layout satisfies the
+   regulatory requirement at lower operational cost.
+2. **Per-drone firmware builds are operationally expensive.** They
+   require a unique signed firmware image per serial number, per-drone
+   key escrow in the manufacturer's QMS, a recovery path when the
+   firmware needs an update (each `bl_update` would also need a
+   per-drone re-bake), and per-drone integration into the manufacturing
+   runbook. None of this cost buys protection that BOOT007 + FTP
+   path-deny don't already provide.
+
+**Threat-surface review (recorded for audit).** The full set of paths
+by which an attacker could reach the signing-key bytes, and how each is
+closed:
+
+| # | Attack path | Closed by | Notes |
+|---|---|---|---|
+| 1 | Pop SD card, read on external card reader | BOOT007 seal | Same control as RDP-L2 replacement |
+| 2 | USB console (PX4 nsh over USB CDC) → `cat /fs/microsd/mavlink/mavlink-signing-key.bin` | BOOT007 seal | USB port is inside the sealed enclosure |
+| 3 | MAVLink FTP read (`OpenFileRO` / `BurstReadFile`) | `_validatePath` deny | Returns `kErrFailFileProtected` |
+| 4 | MAVLink FTP write (`OpenFileWO` / `WriteFile` / `CreateFile`) | `_validatePath` deny | Same chokepoint |
+| 5 | MAVLink FTP list (`ListDirectory`) | `_validatePath` deny | Same chokepoint — also hides existence |
+| 6 | MAVLink FTP rename/remove | `_validatePath` deny | Same chokepoint |
+| 7 | `mavlink_shell` (`SerialControl` MAVLink msg) → nsh → `cat` | MAVLink signing requirement (`MAV_SIGN_CFG=1` LOCKED) | Self-protecting: invoking the shell requires already-signed traffic, which requires already having the key |
+| 8 | Key bytes leaked into a ULog flight log downloadable over FTP | Provisioning code must not log the key | One-line audit (no `PX4_INFO("%02x …")` patterns on the key buffer) |
+| 9 | Key bytes leaked into a coredump | `_validatePath` deny on `/fs/microsd/log/` coredump path, or short-lived key buffer | Lower priority; verify during hardware bring-up |
+| 10 | SWD/JTAG memory dump | BOOT007 seal | Existing |
+| 11 | Bootloader DFU | DFU cannot read SD card | Bootloader operates on flash only |
+
+Paths 1, 2, 10 are closed by an existing seal we already plan to
+apply. Paths 3–6 are closed by one localized PX4 change. Path 7 is
+self-protecting. Paths 8, 9 are small audit items to verify, not
+new architecture.
+
+**Implementation surface.**
+
+- `~/PX4-Autopilot/src/modules/mavlink/mavlink_ftp.cpp`: extend
+  `_validatePath` (already the chokepoint for list/read/write/remove/
+  rename — see existing `kErrFailFileProtected` returns at lines 328,
+  480, 594, 626, 650, 811, 834, 857, 882) with a deny check for
+  paths matching `/fs/microsd/mavlink/mavlink-signing-key.bin`. Likely also
+  cover `/fs/microsd/inofly/audit_log.bin` write-deny (log file
+  should be append-only from the FC side; QGC reads but never writes).
+- `tools/provisioning/provision_signing_key.py`: no change — still
+  writes via `--hardware-mount <sd>` direct file write at the factory
+  (never traverses MAVLink FTP), so the deny rule does not affect
+  provisioning.
+- No firmware-image, manifest, or signer change.
+- No QGC change.
+
+**Rollout order.**
+
+1. Hardware bring-up tests PAIR001 functionality on the unmodified
+   SD-card layout (functionality is already implemented end-to-end).
+2. After PAIR001 functional pass on hardware, land the
+   `_validatePath` deny change as a hardening commit.
+3. Apply BOOT007 seal at manufacturing time per
+   `Docs/MANUFACTURING_RUNBOOK.md` (still to be authored).
+
+**Alternatives considered.**
+
+- *Per-drone firmware bake (the 2026-05-09 plan).* Rejected for the
+  cost reasons above. The security delta over BOOT007 + FTP path-deny
+  is zero against the threat model that actually applies (Gazette §7.1
+  GCS-authentication requirement + reasonable physical-tamper threat
+  on a sealed airframe).
+- *FTP read-only on the signing-key path (not full deny).* Rejected.
+  The MAVLink signing key is symmetric — read access alone lets an
+  attacker forge signed traffic indistinguishable from the operator.
+  Confidentiality of the key is as load-bearing as its integrity.
+- *Encrypt the SD-card file with a per-board key derived at boot.*
+  Rejected for Level 1 — re-introduces a device-resident decryption
+  key (DEV001 risk), adds storage-encryption complexity, and provides
+  no additional protection against any of the threats in the table
+  above (each path either has direct memory/console access where the
+  decrypted form is reachable, or is closed before decryption is
+  attempted).
+- *Move the file off the SD card into NuttX MTD-backed storage
+  (e.g. `parameters_backup.bson`-style internal flash).* Rejected —
+  internal flash readout requires the same physical-tamper preconditions
+  as SD-card readout (debugger, seal break), so the threat reduction
+  is small; meanwhile the provisioning flow becomes more complex
+  (factory writes via custom command instead of file write).
+
+**What does NOT change.**
+
+- PAIR001 wire protocol — still PX4/QGC native MAVLink2 signing.
+- Key derivation — still `SHA256(passphrase)`.
+- Provisioning UX — same `provision_signing_key.py --drone-id --passphrase`.
+- LOCKED status of `MAV_SIGN_CFG=1` (ADR-020) — still enforces signing
+  cannot be disabled at runtime.
+- BOOT001 / BOOT006 / BOOT007 chain — unchanged.
+
+### ADR-022 — Bootloader as SD-card one-shot at factory (planned, not executed) (2026-05-12, amends ADR-015)
+
+**Status:** Decided 2026-05-12, **not yet executed**. Recorded so the
+rationale and the verified PX4 bl_update behavior are captured;
+implementation deferred until the next FLASH-pressure event on the
+CubeOrange+ app firmware build. ADR-015 (bl_update / ROMFS-bundled
+bootloader as install path) remains in force until then.
+
+**Decision (when triggered).** The secure bootloader binary will no
+longer be bundled in the app firmware's ROMFS. Instead, at factory
+provisioning time, `secure_bootloader.bin` is uploaded to the SD card
+once and installed via `bl_update /fs/microsd/secure_bootloader.bin`.
+After this one-shot install, the secure bootloader is **effectively
+immutable** for the lifetime of the unit — any future bootloader
+change requires an RMA back to factory.
+
+**Why this is being recorded now without execution.** The
+CubeOrange+ app firmware is currently at ~99% of available FLASH
+even after the 2026-04-29 disabling of FW + VTOL modules
+(`ada23d2412` on the PX4 fork). The bootloader binary in ROMFS
+costs ~85–103 KB. We have no immediate need to recover that space
+(FW and VTOL are not required for our Multirotor product — `CA_AIRFRAME`
+LOCKED = 0 per ADR-020 — so their absence is product-scope alignment,
+not sacrifice). But the next feature addition that bumps app fw
+size will trigger overflow, and we want the decision and mechanism
+documented in advance rather than rushed under build-failure
+pressure.
+
+**Why this works (verified against PX4 source).** PX4's `bl_update`
+command (`src/systemcmds/bl_update/bl_update.cpp`) takes a file path
+as its argument and passes it directly to `open()` — no restriction
+to ROMFS, no hard-coded prefix. The boot-time auto-trigger
+(`platforms/nuttx/init/rc.board_bootloader_upgrade.in`) is a
+*separate* mechanism that reads from ROMFS; bypassing it does not
+disable manual invocation. On STM32H7 (CubeOrange+):
+
+| Constraint | Value | Our bootloader |
+|---|---|---|
+| `BL_FILE_SIZE_LIMIT` | 128 KB | ~103 KB target → fits with ~25 KB headroom |
+| Header validation | first 8 bytes: stack pointer in RAM range, entrypoint in FLASH bootloader range | Already satisfied by any valid bootloader image |
+| FLASH operation | erase sector 0 + program + verify | Same code path as ROMFS-sourced bl_update |
+
+**Factory provisioning sequence (under this ADR).**
+
+The order is **app firmware first, then bootloader** — counterintuitive
+but the only viable order. `bl_update` is a NuttX shell command that
+lives inside the app firmware, so a running app fw is required to
+install the bootloader. The Hex factory state ships with the stock
+PX4 bootloader, which accepts unsigned firmware uploads over the PX4
+wire protocol — this is the bootstrap-trust window.
+
+1. Cube arrives from Hex with stock PX4 bootloader running, Hex
+   factory seal intact. Stock bootloader accepts unsigned uploads
+   over USB.
+2. Factory flashes **manufacturer-signed app firmware** over USB
+   via stock bootloader (QGC or `px_uploader`). Signature is not
+   checked at this step — stock bootloader doesn't know how.
+3. Boot into our app fw under stock bootloader. App fw runs.
+4. Upload `secure_bootloader.bin` to SD via MAVLink FTP, or
+   pre-load the SD card before insertion.
+5. From `pxh>` or via MAVLink shell:
+   `bl_update /fs/microsd/secure_bootloader.bin`. App fw reads
+   the file, validates header, erases sector 0, writes secure
+   bootloader, verifies. ~5–10 seconds.
+6. Reboot.
+7. Secure bootloader runs for the first time. Computes RSA-PSS
+   verify of the already-installed app fw against the embedded
+   manufacturer pubkey → PASS (signed by us in step 2). Hands
+   off to app fw.
+8. Provisioning script deletes `/fs/microsd/secure_bootloader.bin`
+   (one-shot use) and writes the per-drone MAVLink signing key
+   per ADR-021 + the binary manifest per existing PRV001 flow.
+9. Apply BOOT007 tamper-evident seal.
+
+After step 7, the unit is in the production regime: secure bootloader
+runs every boot, refuses DFU (BOOT005), requires signed app fw
+(BOOT001). Future app fw updates ride the MAVLink-FTP signed-upload
+path. The bootloader itself is never touched again.
+
+**Critical: step 2 must use a signed app fw.** The stock bootloader
+doesn't verify the signature, but the secure bootloader installed in
+step 5 *will* verify it on the very next boot (step 7). Flashing an
+unsigned image in step 2 would brick the unit at step 7. The signing
+happens at the manufacturer's offline signing infrastructure (same
+key chain as every other artifact in our architecture — ADR-016
+RSA-2048).
+
+**What changes vs. ADR-015.**
+
+| Property | ADR-015 (current) | ADR-022 (when triggered) |
+|---|---|---|
+| Bootloader location in app fw | Bundled in ROMFS (~85–103 KB) | Absent |
+| Install mechanism at factory | `rc.board_bootloader_upgrade` auto-trigger reads from `/etc/extras/...` in ROMFS | Manual `bl_update /fs/microsd/...` from pxh |
+| Field bootloader updates | Possible — every signed app fw OTA can carry a new bootloader | **Not possible** — RMA required |
+| FLASH cost in app fw | ~85–103 KB always | 0 KB |
+| BOOT001 / BOOT005 / BOOT007 chain | Unchanged | Unchanged |
+| Signed-only enforcement post-bootstrap | Unchanged | Unchanged |
+| Compliance posture vs. Gazette §7.1 | Compliant | Compliant — Gazette does not mandate field-updatable bootloader, only signed firmware updates |
+
+**Implementation surface (when executed).**
+
+- `~/PX4-Autopilot/boards/cubepilot/cubeorangeplus/default.px4board`:
+  disable the kconfig flag that bundles the bootloader binary into
+  ROMFS (likely `CONFIG_BOARD_BOOTLOADER_UPGRADE` or the equivalent;
+  exact symbol to be confirmed at execution time).
+- `~/PX4-Autopilot/boards/cubepilot/cubeorangeplus/init/rc.board_bootloader_upgrade`:
+  remove or no-op the boot-time auto-trigger (it would otherwise
+  silently skip itself when `/etc/extras/bootloader.bin` is absent,
+  but explicit removal is cleaner).
+- `tools/provisioning/`: add a small script wrapping the factory
+  sequence (steps 2–8 above) so manufacturing has a one-command flow.
+- `Docs/MANUFACTURING_RUNBOOK.md` (still to be authored under
+  BOOT007): includes the updated step ordering and the
+  signed-but-unverified app fw subtlety from step 2.
+- `secure_bootloader.bin`: produced by the existing bootloader build
+  pipeline (signer already targets it); just emitted as a standalone
+  artifact instead of being copied into the app fw's ROMFS staging.
+- No change to the bootloader source code itself.
+- No change to RSA-PSS signing infrastructure.
+- No change to QGC.
+
+**Trade-off being accepted.**
+
+The bootloader becomes effectively immutable post-manufacturing.
+Field bootloader updates are impossible without RMA. This is
+defensible because:
+
+1. The bootloader is small, stable code: signature verify + jump
+   to app fw entry. Minimal attack surface.
+2. The crypto code (libtomcrypt RSA-PSS) is mature, well-audited,
+   low likelihood of needing security patches.
+3. Many certified secure-boot systems treat the bootloader as
+   effectively immutable (TPM firmware rarely updated; Apple
+   Secure Enclave bootloader is not field-updatable separately).
+4. DGCA Gazette §7.1 does not mandate field-updatable bootloader.
+   The compliance requirement is signed firmware updates, which
+   ride the app fw update path and are unaffected.
+5. If a bootloader vulnerability is ever discovered that requires
+   patching, a fleet-wide RMA is the appropriate response anyway —
+   the same vulnerability would affect every unit identically, and
+   trusting an OTA bootloader update on units that may already be
+   compromised is itself a risk.
+
+**Alternatives considered.**
+
+- *Variant B — two firmware images (factory "fat" + production "lean").*
+  Considered. Same FLASH savings on production, preserves the option
+  of in-the-future bootloader updates via a re-issued fat image flashed
+  at RMA. Adds release-pipeline complexity (two signed artifacts per
+  release). Rejected as more complex than Variant A for no security
+  benefit — if RMA is the recovery path for bootloader updates anyway,
+  the production lean image never needs the bundling.
+- *Keep current ADR-015 indefinitely, strip more PX4 modules instead.*
+  Considered. The 2026-05-10 strip survey
+  (`project_session_pickup_20260510_strip_explored_3items_status.md`)
+  exhausted the easy candidates; remaining stripping options carry
+  unclear product-impact risk. Variant A gives a single, well-bounded
+  ~85–103 KB cushion that doesn't require touching feature code.
+- *DFU-flash bootloader separately at factory.* Rejected — requires
+  breaking the Hex factory seal to access BOOT0 on CubeOrange+, which
+  ADR-013 explicitly avoids.
+
+**Trigger condition for executing this ADR.**
+
+Execute when an app firmware build for `cubeorangeplus_default`
+overflows FLASH after reasonable code-side optimization has been
+attempted. At that point: revisit this ADR, confirm the kconfig
+symbol, implement the build-system change, update
+`provision_signing_key.py` / manufacturing script, and amend
+ADR-015 to "superseded by ADR-022."
+
+**What does NOT change at execution time.**
+
+- BOOT001 (bootloader RSA-PSS verify of app fw) — unchanged.
+- BOOT005 (secure bootloader software-refuses DFU) — unchanged.
+- BOOT007 (tamper-evident seal) — unchanged.
+- ADR-016 RSA-2048 signing infrastructure — unchanged.
+- ADR-018 code/data hash split — unchanged.
+- ADR-019/020 PAR001 enforcement — unchanged.
+- ADR-021 PAIR001 SD-card key + FTP path-deny — unchanged.
+- Hex factory seal preservation — unchanged.
+
 ---
 
 ## 13. Residual risks (acknowledged)
