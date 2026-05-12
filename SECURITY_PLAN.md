@@ -89,7 +89,7 @@ factory seal.
 | POST003| POST — verify actual data hash (NuttX)    | POST               | ✅ Code done (hw test pending) |
 | POST004| POST — verify board ID matches hardware   | POST               | ✅ Code done (hw test pending) |
 | ARM001 | Arming blocked if POST failed             | Arming Gate        | ✅ Done        |
-| PAR001 | Compliance parameter protection (static ceiling + cap-semantics, ADR-019) | Param Protection   | ⏳ Cap-semantics rewrite pending; static-compilation chain unchanged |
+| PAR001 | Compliance parameter protection (static values + CAPPED/LOCKED kinds, ADR-019 + ADR-020) | Param Protection   | ⏳ CAPPED implementation done (commit `196b09a4f8`); LOCKED kind split in progress |
 | LOG001 | Per-file RSA signed audit log              | Audit Logging      | ✅ Done (SITL)  |
 | UPD001 | Drone rejects unsigned firmware update    | Secure Update      | ✅ Done        |
 | PAIR001| GCS-FC pairing (MAVLink signing)          | GCS Locking        | ✅ Done (SITL)  |
@@ -134,73 +134,88 @@ read from `firmware.prototype` by CMake). For CubeOrange+: 1063.
 - **SITL:** Stubbed (returns true) — `SECURE_BOOT_BOARD_ID` not defined in SITL builds
 - **Status:** Code complete, pending first hardware build and test
 
-### PAR001 — Compliance parameter protection (static ceiling + cap-semantics)
+### PAR001 — Compliance parameter protection (static values + CAPPED/LOCKED kinds)
 
-> **Enforcement model amended 2026-05-11 (ADR-019).** Earlier wording
-> in this section described "zero-window protection" — `param_set`
-> blocked entirely for compliance-protected params. That model has
-> been replaced by **cap-semantics**: the compiled value is now a
-> *ceiling*, not a frozen value. The set of protected parameters and
-> the static-compilation mechanism (the ceiling lives in the
-> `.compliance_params` flash table covered by `data_hash`) are
-> unchanged. See ADR-019 in `Docs/ARCHITECTURE.md §12` for the full
-> rationale.
+> **Enforcement model amended 2026-05-11 (ADR-019 + ADR-020).** The
+> original "zero-window protection" framing has been replaced first by
+> **cap-semantics** (ADR-019) and then split into two **kinds**
+> (ADR-020): some compliance-protected params are *operator-tunable
+> caps* (CAPPED), others are *certificate-fixed configuration*
+> (LOCKED). The set of protected parameters and the static-
+> compilation mechanism (values live in the `.compliance_params`
+> flash table covered by `data_hash`) are unchanged. See ADR-019 and
+> ADR-020 in `Docs/ARCHITECTURE.md §12` for the full rationale.
 
-Safety-critical compliance parameters have a **registered ceiling**
-statically compiled into the firmware binary. The ceiling cannot be
-changed at runtime from any GCS; the operator may set any value
-**at-or-below** the ceiling for the current flight, but values are
-not persisted across reboots.
+Safety-critical compliance parameters have a **registered value**
+statically compiled into the firmware binary. The value cannot be
+changed at runtime from any GCS. For CAPPED params it is interpreted
+as a *ceiling* (operator may set any value `(0, ceiling]` for the
+current flight, RAM-only). For LOCKED params it is the *registered
+value* (firmware seeds it at boot, operator writes are rejected).
 
 **Protected parameters** (from audited docs, Section 3.1b):
-- Max Altitude AGL → `GF_MAX_VER_DIST`
-- Max Speed → `MPC_XY_VEL_MAX`
-- Fence Range → `GF_MAX_HOR_DIST`
-- Frame Type → `SYS_AUTOSTART`
-- Frame Configuration → `CA_AIRFRAME`
-- MAVLink Signing Mode → `MAV_SIGN_CFG` (PAIR001)
-- Additional client-specific parameters (table is extensible)
 
-**Approach — cap-semantics at the parameter library level:**
-A single table in `compliance_params.h` lists every parameter to
-protect (name, description, type, **ceiling value**). Enforcement
-runs directly in PX4's parameter system (`src/lib/parameters/`), not
-by polling:
+| Param | Kind | Registered value | Description |
+|---|---|---|---|
+| `GF_MAX_VER_DIST` | CAPPED | 120 m | Max Altitude AGL — operator-tunable mission cap |
+| `GF_MAX_HOR_DIST` | CAPPED | 500 m | Fence Range — operator-tunable mission cap |
+| `MPC_XY_VEL_MAX` | CAPPED | 15 m/s | Max Speed — operator-tunable mission cap |
+| `SYS_AUTOSTART` | **LOCKED** | 4001 | Certified airframe model identifier |
+| `CA_AIRFRAME` | **LOCKED** | 0 (Multirotor) | Mixer geometry class |
+| `MAV_SIGN_CFG` | **LOCKED** | 1 (required) | MAVLink signing mode — defeating disables PAIR001 |
 
-- **Boot:** every compliance-protected param is seeded to **0** in
-  `user_config[param]` (the RAM-side runtime value). The compiled
-  ceiling stays in the `.compliance_params` flash table.
+Additional client-specific parameters can be added by appending rows
+to `compliance_params.cpp` with the appropriate kind.
+
+**Approach — kind-aware enforcement at the parameter library level:**
+A single table in `compliance_params.cpp` lists every parameter to
+protect (name, description, type, **kind** = CAPPED or LOCKED,
+registered value). Enforcement runs directly in PX4's parameter
+system (`src/lib/parameters/`), not by polling:
+
+- **Boot read (no `user_config` entry yet):**
+  - CAPPED params return **0** (lazy-zero path in `param_get`).
+  - LOCKED params return the **registered value** (same lazy-zero
+    path, kind-aware). No explicit boot-seeding step required.
 - **`param_set v`** — for a compliance-protected param:
-  - if `v ∈ (0, ceiling]`: accepted; `user_config[param] = v`; **no
-    audit-log entry** (this is normal operator action).
-  - if `v > ceiling`: rejected with
-    `MAV_PARAM_ERROR_VALUE_OUT_OF_RANGE` (or PX4 equivalent);
-    rejection message **includes the ceiling**: *"cannot set VERT_MAX
-    to 50.0 — compliance ceiling is 10.0"*; fires a
-    `COMPLIANCE_PARAM_VIOLATION` event into the SecurityAuditLogger
-    (LOG001).
-- **`param_get`** — returns the RAM-side `user_config[param]` (so
-  flight code consumes whatever the operator set for this flight),
-  *not* the compiled ceiling.
-- **`param_reset_internal` / `param_reset_all_internal`** — for
-  compliance params, set `user_config[param] = 0` (was: blocked
-  entirely under the prior zero-window model).
-- **`param_save_default` / autosave** — **skip** compliance-protected
-  params, so operator-set values never persist to flash. Reboot
-  always returns the param to 0.
-- **Pre-arm hook (Commander)** — **block arming** if any
-  compliance-protected param is currently 0; the arming-rejection
-  message names the offending param(s).
+  - **CAPPED**, `v ∈ (0, ceiling]`: accepted; `user_config[param] = v`;
+    **no audit-log entry** (normal operator action).
+  - **CAPPED**, `v > ceiling`: rejected with
+    `MAV_PARAM_ERROR_VALUE_OUT_OF_RANGE`; rejection message includes
+    the ceiling: *"cannot set GF_MAX_VER_DIST to 200.0 — compliance
+    ceiling is 120.0"*; fires `COMPLIANCE_PARAM_VIOLATION` into the
+    SecurityAuditLogger (LOG001).
+  - **LOCKED**, `v == registered`: accepted (semantic no-op — the
+    value doesn't change). No audit entry. Lets PX4 ROMFS init
+    scripts re-set airframe params at boot without noise.
+  - **LOCKED**, `v != registered`: rejected; detail string
+    `"attempted=X registered=Y (LOCKED)"`; fires
+    `COMPLIANCE_PARAM_VIOLATION`.
+- **`param_get`** — returns `user_config[param]` if present, else
+  takes the lazy-zero path: 0 for CAPPED, registered value for LOCKED.
+- **`param_reset_internal` / `param_reset_all_internal`** — clears
+  `user_config[param]` for any kind. CAPPED reads back as 0; LOCKED
+  reads back as registered value via the same lazy-zero path.
+- **`param_save_default` / autosave** — **skip** all
+  compliance-protected params, so RAM values never persist to flash.
+- **Pre-arm hook (Commander)** — **block arming** if any **CAPPED**
+  param currently reads as 0; the arming-rejection message names the
+  offending param. LOCKED params are skipped by the gate (always
+  read as registered).
 
 `ComplianceParamGuard` keeps its audit-only role: registers the
 violation callback for over-cap attempts, provides `param_status`
 diagnostics. Adding a new protected parameter still requires only
 one row in `compliance_params.h` — no code changes.
 
-**Violation logging:** *Only* over-cap `param_set` attempts are
-logged (as `COMPLIANCE_PARAM_VIOLATION` via LOG001). Successful
-within-cap operator sets are not audit-log events — the audit log
-records security events; a within-cap operator action is not one.
+**Violation logging:** over-cap `param_set` attempts on CAPPED params
+**and mismatched `param_set` attempts on LOCKED params** are logged
+(as `COMPLIANCE_PARAM_VIOLATION` via LOG001). Within-cap operator
+sets on CAPPED params and `v == registered` writes on LOCKED params
+are **not** audit-log events — within-cap is normal operator action;
+matching LOCKED writes are semantic no-ops. The compliance property
+is *"operator cannot move the certified value away"*, and only an
+actual attempt to move it counts as an event.
 
 **Audit-log vs flight-telemetry-log distinction.** The audit log no
 longer captures what *value* the operator chose for a flight; only
@@ -624,9 +639,10 @@ physical anti-tamper on production avionics.
 | Sub-phase | Req ID | Description | Status |
 |-----------|--------|-------------|--------|
 | 4.1 | PAR001 | Table-driven compliance_params.h (extensible per client) | ✅ Done |
-| 4.2 | PAR001 | Cap-semantics in parameter library: param_set v ≤ ceiling accepted in RAM, > ceiling rejected, boot-at-zero, autosave-skip, pre-arm gate (ADR-019) | ⏳ Pending — code rewrite of `src/lib/parameters/parameters.cpp` + pre-arm hook |
+| 4.2 | PAR001 | Cap-semantics in parameter library: param_set v ≤ ceiling accepted in RAM, > ceiling rejected, boot-at-zero, autosave-skip, pre-arm gate (ADR-019) | ✅ Done — PX4 fork commit `196b09a4f8` on `inofly-par001-merge` |
+| 4.2a | PAR001 | CAPPED/LOCKED kind split: LOCKED params boot-seed registered value, reject all writes, skipped by pre-arm gate, every attempt audit-logged (ADR-020) | ⏳ In progress (this session) |
 | 4.3 | PAR001 | Audit logging of parameter change violations | ✅ Done |
-| 4.4 | PAR001 | Tests + compliance mapping | ⏳ Existing 26 zero-window tests being rewritten as cap-semantics tests (ADR-019) |
+| 4.4 | PAR001 | Tests + compliance mapping | ✅ 26 zero-window tests rewritten as 51 cap-semantics tests (inoflyTools commit `f498852`); ⏳ adding LOCKED-kind tests for ADR-020 |
 
 ### Phase 5 — Hardware Deployment (CubeOrange+) 🔧 In Progress
 

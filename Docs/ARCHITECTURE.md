@@ -86,7 +86,7 @@ requires a recorded entry in §12 and team agreement.
 | L6 | **No flash encryption (no AES-in-OTP)** for Level 1 — the audited reference-style confidentiality control is not required by DGCA Level 1 | §10, ADR-004 |
 | L7 | **libtomcrypt on NuttX (app fw + bootloader), OpenSSL on host/SITL** — both speak RSA-PSS / SHA-256 interoperably; libtomcrypt is the MCU-sized library already linked into PX4 (no new dependency). Earlier doc revisions said "mbedTLS on hardware"; that wording was always stale — the actual library is libtomcrypt. ADR-005 reworded 2026-05-07 to match. | PROJECT_NOTES.md, ADR-005 |
 | L8 | **Audit log: per-file RSA-2048 signing**, public-key encryption of SHA-256 hash | SECURITY_PLAN.md §LOG001, ADR-006, ADR-016 |
-| L9 | ~~**Static parameter compilation** for compliance-critical params (zero-window protection)~~ ⚠️ **AMENDED 2026-05-11 (ADR-019).** ✅ **CURRENT:** Compiled values are interpreted as **ceilings** (cap-semantics). Operator may `param_set v` for `v ∈ (0, ceiling]`; the value lives in RAM only and is not persisted. Boot value is 0; pre-arm blocks arming until every compliance-protected param has been set above 0. Over-cap attempts raise `COMPLIANCE_PARAM_VIOLATION` with the ceiling included in the message. Static compilation of the *ceiling* into the `.compliance_params` table (covered by `data_hash`) is unchanged. | SECURITY_PLAN.md §PAR001, ADR-007, ADR-019 |
+| L9 | ~~**Static parameter compilation** for compliance-critical params (zero-window protection)~~ ⚠️ **AMENDED 2026-05-11 (ADR-019 + ADR-020).** ✅ **CURRENT:** Compliance-protected params split into two kinds. **CAPPED** (mission-tunable caps — `GF_MAX_VER_DIST`, `GF_MAX_HOR_DIST`, `MPC_XY_VEL_MAX`): compiled value is a ceiling; operator may `param_set v` for `v ∈ (0, ceiling]`; RAM-only, not persisted; boot value is 0; pre-arm blocks until every CAPPED row is `> 0`; over-cap rejection raises `COMPLIANCE_PARAM_VIOLATION` with ceiling in message. **LOCKED** (type-cert configuration — `SYS_AUTOSTART`, `CA_AIRFRAME`, `MAV_SIGN_CFG`): compiled value is the registered value; firmware seeds it at boot; **all** operator writes are rejected; pre-arm skips LOCKED rows; every write attempt logs a `COMPLIANCE_PARAM_VIOLATION` with detail `attempted=X registered=Y (LOCKED)`. Static compilation of values into the `.compliance_params` table (covered by `data_hash`) is unchanged. | SECURITY_PLAN.md §PAR001, ADR-007, ADR-019, ADR-020 |
 | L10 | **MAVLink signing with `SHA256(passphrase)` key derivation** for GCS-FC pairing | SECURITY_PLAN.md §PAIR001, ADR-008 |
 | L11 | ~~**POST in app firmware on SITL; POST in bootloader on hardware** (Phase 5b)~~ ⚠️ **AMENDED 2026-05-10 (ADR-018).** ✅ **CURRENT:** POST runs in **app firmware** on both SITL and hardware. The bootloader's role is **signature verification only (BOOT001)**; the `code_hash` / `data_hash` check against the signed manifest is an app-firmware responsibility that gates arming. | SECURITY_PLAN.md §POST002/003, ADR-009, ADR-018 |
 | L12 | **Two update paths, both gated:** ~~Path A (DFU) closed by BOOT003~~; Path B (MAVLink-FTP) closed by UPD001 + BOOT001 re-verify ⚠️ **AMENDED 2026-05-04 (ADR-014).** ✅ **CURRENT:** Path A (DFU) closed by **software DFU-refuse** in the secure bootloader (ArduPilot pattern). Path B unchanged. | §8, ADR-010, ADR-014 |
@@ -2002,7 +2002,7 @@ gates.
 - The bootloader's BOOT001 signature check remains the only thing
   that gates jumping into app firmware — exactly as before.
 
-### ADR-019 — PAR001 cap-semantics with boot-at-zero + pre-arm gate (2026-05-11, supersedes ADR-007)
+### ADR-019 — PAR001 cap-semantics with boot-at-zero + pre-arm gate (2026-05-11, supersedes ADR-007) ⚠️ Amended same-day by ADR-020 (CAPPED/LOCKED kind split — applies to three of the canonical-6 params)
 
 **Status:** Accepted 2026-05-11. Supersedes ADR-007 (zero-window
 protection). The set of compliance-protected parameters and the
@@ -2136,6 +2136,156 @@ rewritten as cap-semantics tests:
 
 ---
 
+### ADR-020 — Two compliance-param kinds: CAPPED vs LOCKED (2026-05-11, amends ADR-019)
+
+**Status:** Accepted 2026-05-11. Amends ADR-019; does not supersede
+it. ADR-019's cap-semantics still apply to CAPPED params unchanged;
+ADR-020 introduces a second kind (LOCKED) for params that the original
+ADR-019 framing could not represent.
+
+**Decision.** The compliance-param table gains a `kind` field. Each
+row is one of:
+
+| Kind | Boot read (no user write yet) | `param_set v` | Pre-arm gate | Audit log on write |
+|---|---|---|---|---|
+| **CAPPED** | 0 | accept iff `v ∈ (0, ceiling]` | block until `v > 0` | only over-cap rejections |
+| **LOCKED** | registered value (returned via lazy-zero in `param_get`) | accept iff `v == registered`; reject otherwise | always passes (always reads as registered) | only mismatch rejections (matching writes are no-ops) |
+
+**Reclassification of the canonical 6.**
+
+| Param | Kind | Value | Why |
+|---|---|---|---|
+| `GF_MAX_VER_DIST` | CAPPED | 120 m | Operator-tunable mission cap |
+| `GF_MAX_HOR_DIST` | CAPPED | 500 m | Operator-tunable mission cap |
+| `MPC_XY_VEL_MAX` | CAPPED | 15 m/s | Operator-tunable mission cap |
+| `SYS_AUTOSTART` | **LOCKED** | 4001 | Certified airframe model — defines aircraft identity |
+| `CA_AIRFRAME` | **LOCKED** | 0 (Multirotor) | Mixer geometry class — defines control allocation |
+| `MAV_SIGN_CFG` | **LOCKED** | 1 (required) | GCS-FC pairing policy — disabling defeats PAIR001 |
+
+**Why amend ADR-019 now.** ADR-019 rejected a per-param policy split
+under the assumption that "every compliance-protected parameter
+currently fits the CAP model." That premise was wrong for three
+params:
+
+- `CA_AIRFRAME`'s natural ceiling under cap-semantics is 0 (the
+  Multirotor default), but `(0, 0]` is the empty set — operator can
+  never satisfy the pre-arm gate, drone never arms. Surfaced
+  during SITL §6/§7 walkthrough prep.
+- `SYS_AUTOSTART` encodes the certified airframe model. Letting the
+  operator pick any value in `(0, 4001]` lets them reconfigure into a
+  different aircraft — a different type certificate.
+- `MAV_SIGN_CFG=1` is the only legal value at flight time; CAPPED
+  semantics would require the operator to remember `param set
+  MAV_SIGN_CFG 1` every boot, with the only failure mode being
+  forgetting and getting a pre-arm fail. Pointless friction.
+
+These three are not safety *caps* — they are *certificate-fixed
+configuration*. Mixing them into the CAPPED table abuses the ceiling
+field. ADR-020 gives them their own kind.
+
+**Why LOCKED params read-through-lazy-zero (not active boot-seed).**
+The simplest correct behavior: `param_get` returns the registered
+value for any LOCKED param whose `user_config` slot is empty. No
+explicit boot-seeding step required — flight code sees the registered
+value from the first read. This avoids ordering hazards (seed must
+run before any module reads the param) and removes the need for a
+privileged setter API.
+
+**Why LOCKED accepts `v == registered` (no-op writes succeed).** PX4
+ROMFS init scripts re-set airframe params at boot (e.g.
+`param set SYS_AUTOSTART $SYS_AUTOSTART` in `rcS:137`). Under a
+strict-reject rule, these would either need a privileged-bypass
+setter (invasive across PX4) or produce 3+ spurious audit entries
+every boot. Accepting writes that match the registered value is a
+true no-op (the value doesn't change); the compliance property —
+*operator cannot move the certified value away* — is preserved.
+This matches the the audited reference reference pattern (locked airworthiness
+params reject *changes*, not byte-identical re-writes).
+
+**Why LOCKED rejection (only) is audit-logged.** A CAPPED within-cap
+write is normal operator action and isn't logged (ADR-019). A LOCKED
+write where `v != registered` is a deviation attempt against the
+certified configuration — exactly the kind of event the audit log
+exists for. A LOCKED write where `v == registered` is a semantic
+no-op and isn't logged. Detail string for rejections distinguishes
+from CAPPED over-cap: `"attempted=X registered=Y (LOCKED)"`.
+
+**Prior art / alignment.** The the audited reference DGCA-compliance reference
+implementation (also covered by the the audited reference audit we align with) splits
+its protected-parameter set the same way: locked-by-firmware
+(bootloader, code checksum, embedded pubkey) vs operator-capped
+(vertical geofence 120 m, geofence radius, datalink-loss threshold,
+RTL/failsafe actions). The locked set in our table extends this
+pattern to airframe identity and pairing policy, which are
+type-cert-fixed in the same sense. See
+[`reference-vendor.example/blog/dgca-qci/`](https://reference-vendor.example/blog/dgca-qci/).
+
+**Alternatives considered.**
+
+- *Keep cap-only, set `CA_AIRFRAME` ceiling = 15.* Rejected — operator
+  could pick any of 1..15, reconfiguring the mixer class away from
+  the certified geometry. Defeats compliance intent.
+- *Allow `[0, ceiling]` (include 0) with a separate per-param
+  "configured" bit.* Rejected — adds per-param state; doesn't solve
+  the underlying type-cert-fixed-config problem; operator could
+  still pick the wrong frame class.
+- *Drop `CA_AIRFRAME` / `SYS_AUTOSTART` from the compliance table.*
+  Rejected — they **are** the airframe identity for DGCA type
+  certification; dropping them removes the property the table exists
+  to protect.
+
+**Implementation surface.**
+
+- `~/PX4-Autopilot/src/modules/secure_boot/compliance_params.h`: add
+  `compliance_kind_t { COMPLIANCE_KIND_CAPPED, COMPLIANCE_KIND_LOCKED }`;
+  add `kind` field to `compliance_param_def_t`.
+- `~/PX4-Autopilot/src/modules/secure_boot/compliance_params.cpp`: tag
+  each row; reclassify the three LOCKED rows per the table above.
+- `~/PX4-Autopilot/src/lib/parameters/compliance_check.cpp`:
+  - `param_check_within_cap(param, val)` → CAPPED unchanged; LOCKED
+    returns true iff `v == registered`, false otherwise.
+  - `param_compliance_first_unset()` → skip LOCKED rows (lazy-zero
+    in `param_get` ensures they always read as `registered`).
+  - `param_notify_compliance_violation()` — detail string variant
+    `"attempted=X registered=Y (LOCKED)"` for LOCKED rejections.
+- `~/PX4-Autopilot/src/lib/parameters/parameters.cpp`:
+  - `param_get` lazy-zero branch: for compliance-protected params
+    whose `user_config` slot is empty, return 0 for CAPPED rows
+    (unchanged) and **the registered value** for LOCKED rows. Flight
+    code then reads the correct LOCKED value without an explicit
+    boot-seed step.
+  - `param_set_internal` rejection path: unchanged. Cap-check returns
+    false for LOCKED-mismatch; existing notify-violation branch fires.
+- No new public API on `param.h`; no `param_set_compliance_seed()`
+  needed.
+
+**Tests (host, inoflyTools `tests/compliance/`).** Existing CAPPED
+tests unchanged. New:
+
+- `test_PAR001_locked_param_reads_registered_at_boot` — every LOCKED
+  param returns its registered value at boot via the lazy-zero path.
+- `test_PAR001_locked_param_accepts_matching_write` — `param_set v
+  where v == registered` accepted; no audit entry.
+- `test_PAR001_locked_param_rejects_mismatched_write` — `param_set
+  v where v != registered` rejected; audit entry with
+  `attempted=X registered=Y (LOCKED)`.
+- `test_PAR001_locked_param_skipped_by_prearm_gate` — pre-arm gate
+  ignores LOCKED rows even when `user_config` is empty.
+- `test_PAR001_canonical_six_classification` — sanity check the 6
+  rows have the right `kind`.
+
+**What this does NOT change.**
+
+- The `.compliance_params` flash table is still covered by
+  `data_hash`. The new `kind` field becomes part of the binary
+  layout; host hasher recomputes `data_hash` naturally; firmware
+  manifest is re-signed.
+- `param_set` rejection path in `parameters.cpp` unchanged.
+- SecurityAuditLogger wiring, ADR-019 CAPPED semantics, single
+  keypair, bootstrap-trust, POST-in-app-fw — all unchanged.
+
+---
+
 ## 13. Residual risks (acknowledged)
 
 The architecture defends against software-level attacks and
@@ -2226,5 +2376,6 @@ For project-specific requirement IDs (CHK001, BOOT001, etc.), see
 |---|---|---|
 | 1.0 | 2026-04-29 | Initial lockdown. Captures all architectural decisions made through ADR-012. |
 | 1.1 | 2026-04-29 | Added §5.5 (Why POST and RDP L2 are both needed) and §8.4 (How updates work on a chip locked by RDP L2 — internal-vs-external writes, WRP-locked bootloader region, factory provisioning sequence). No architectural changes; expansions of existing decisions to address common auditor questions. |
+| 1.4 | 2026-05-11 | Added ADR-020 (CAPPED/LOCKED kind split, amends ADR-019). Surfaced during SITL §6/§7 walkthrough prep: `CA_AIRFRAME` ceiling=0 made it unsettable under ADR-019 cap-semantics. Root cause: three of the canonical-6 params (`SYS_AUTOSTART`, `CA_AIRFRAME`, `MAV_SIGN_CFG`) are certificate-fixed configuration selectors, not safety caps. New `kind` field on `compliance_param_def_t`; CAPPED rows behave as ADR-019; LOCKED rows boot-seed the registered value, reject all writes, are skipped by the pre-arm gate, and log every write attempt to the audit log. Aligned with the audited reference reference (locked-vs-capped split is the same pattern). No change to flash-table `data_hash` coverage, single-keypair, bootstrap-trust, or POST. |
 | 1.3 | 2026-05-11 | Added ADR-019 (PAR001 cap-semantics with boot-at-zero + pre-arm gate, supersedes ADR-007 enforcement model). Marked ADR-007 as amended; updated lockdown-table row L9 (zero-window → cap-semantics with strikethrough + ✅ CURRENT block); updated §6.2 row "Individual flight parameters (most)" wording; added cross-ref note in ADR-013 "What this does NOT change" list and §14.4 future-hardware list. The set of compliance-protected parameters and the `.compliance_params`/`data_hash` chain are unchanged; only the runtime enforcement model changes from "param_set blocked" to "param_set v ≤ ceiling accepted in RAM, not persisted, boot-at-zero, pre-arm gate." |
 | 1.2 | 2026-05-04 | Partial amendment. Added amendment notice (top), flagged lockdown rows L4/L5/L12/L13 as superseded, added new lockdown rows L14/L15, marked ADR-003/010/011 with supersession pointers, appended ADR-013 (bootstrap-trust + tamper-evident sealing), ADR-014 (software DFU-refuse), ADR-015 (bl_update / ROMFS-bundled bootloader). Forcing function: CubeOrange+ has no externally accessible BOOT0 button on shipped carriers, making OTP write / RDP burn / WRP option-byte set operationally infeasible. **Convention:** retired material in §3–§11 is rendered in `~~strikethrough~~` (or a 🚫 RETIRED label for code-block diagrams that markdown won't strike) and immediately followed by an ✅ CURRENT replacement block. Sections touched: §1 (lockdown table + open-items list), §2.1, §2.2, §3.2, §4.1, §4.2, §4.3 (full strike + current), §4.4 (full strike + current), §5.1 (diagram strike + current), §5.2, §5.3, §5.4, §5.5 (entire RDP framing relabeled, all 5 failure modes amended, layers-stack diagram strike + current), §6.3, §7 (boot sequence step 4, attacker-cannot-skip steps 4 + 7), §8.1 (Path A post-state), §8.3 (gating table Path A row), §8.4 (full strike + current update flow + post-RDP regions table + Phase 5b sequence), §9.1 (auditor walk-through), §9.2 (root-of-trust + bootloader-hardening rows), §10.2 (deviation diagram strike + current), §10.3 (table cells), §10.4 (BOOT004 + OTP space note), §11 (Inofly comparison row + new ArduPilot row + key-observation paragraph), §13 (residual risks: chip-decap, dev-boards, confidentiality rows + new manufacturer-signed-malicious-bootloader-push row), §14.4 (per-chip-family change list), Appendix A→companion-docs table (RDP_BURN_RUNBOOK.md retired pointer), ADR-001 (deployment sub-claim amendment). |

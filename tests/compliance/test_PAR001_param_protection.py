@@ -142,12 +142,12 @@ def _parse_table_values(content):
     result = {}
 
     # Match float entries: {"NAME", "desc", COMPLIANCE_TYPE_FLOAT, {.f = 120.0f}}
-    float_pattern = r'\{"(\w+)",[^}]*COMPLIANCE_TYPE_FLOAT,\s*\{\.f\s*=\s*([\d.]+)f?\}'
+    float_pattern = r'\{"(\w+)",[^}]*COMPLIANCE_TYPE_FLOAT,\s*COMPLIANCE_KIND_\w+,\s*\{\.f\s*=\s*([\d.]+)f?\}'
     for name, val in re.findall(float_pattern, cleaned, re.DOTALL):
         result[name] = float(val)
 
     # Match int entries: {"NAME", "desc", COMPLIANCE_TYPE_INT32, {.i = 4001}}
-    int_pattern = r'\{"(\w+)",[^}]*COMPLIANCE_TYPE_INT32,\s*\{\.i\s*=\s*(\d+)\}'
+    int_pattern = r'\{"(\w+)",[^}]*COMPLIANCE_TYPE_INT32,\s*COMPLIANCE_KIND_\w+,\s*\{\.i\s*=\s*(\d+)\}'
     for name, val in re.findall(int_pattern, cleaned, re.DOTALL):
         result[name] = int(val)
 
@@ -597,12 +597,15 @@ class TestPAR001_ViolationDetailFormat:
         )
 
     def test_PAR001_violation_notifier_formats_attempted_and_ceiling(self):
-        """compliance_check.cpp must format both attempted and ceiling
-        into the detail string passed to the callback."""
+        """compliance_check.cpp must format kind-aware detail strings.
+        For CAPPED rejections the label is 'ceiling'; for LOCKED it is
+        'registered' (ADR-020). Both strings live as label values; the
+        runtime format embeds them as 'ceiling=' or 'registered='."""
         cpp = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.cpp")
-        assert "attempted=" in cpp and "ceiling=" in cpp, (
-            "Violation detail must include attempted+ceiling (ADR-019)"
-        )
+        assert "attempted=" in cpp, "Violation detail must include 'attempted=' (ADR-019)"
+        assert "\"ceiling\"" in cpp, "Violation detail must include 'ceiling' label (ADR-019)"
+        assert "\"registered\"" in cpp, "Violation detail must include 'registered' label (ADR-020)"
+        assert "(LOCKED)" in cpp, "LOCKED-kind detail string must include '(LOCKED)' marker (ADR-020)"
 
     def test_PAR001_guard_writes_details_to_audit_event(self):
         """ComplianceParamGuard.cpp must copy the details string into
@@ -613,3 +616,98 @@ class TestPAR001_ViolationDetailFormat:
         assert "onViolation(const char *param_name, const char *details)" in cpp
         # Details is composed into evt.detail somehow:
         assert "details" in cpp and "evt.detail" in cpp
+
+
+# -- ADR-020 -- CAPPED/LOCKED kind split --
+
+CANONICAL_KINDS = {
+    "GF_MAX_VER_DIST": "CAPPED",
+    "GF_MAX_HOR_DIST": "CAPPED",
+    "MPC_XY_VEL_MAX":  "CAPPED",
+    "SYS_AUTOSTART":   "LOCKED",
+    "CA_AIRFRAME":     "LOCKED",
+    "MAV_SIGN_CFG":    "LOCKED",
+}
+
+
+def _parse_table_kinds(content):
+    """name -> CAPPED|LOCKED extracted from compliance_params.cpp."""
+    cleaned = _strip_comments(content)
+    out = {}
+    pattern = r'\{\"(\w+)\",[^}]*COMPLIANCE_TYPE_\w+,\s*COMPLIANCE_KIND_(\w+),'
+    for name, kind in re.findall(pattern, cleaned, re.DOTALL):
+        out[name] = kind
+    return out
+
+
+class TestPAR001_KindFieldStructural:
+    """compliance_params.h declares the kind enum; .cpp tags every row."""
+
+    def test_PAR001_kind_enum_declared(self):
+        h = _read_header()
+        assert "compliance_kind_t" in h
+        assert "COMPLIANCE_KIND_CAPPED" in h
+        assert "COMPLIANCE_KIND_LOCKED" in h
+
+    def test_PAR001_def_struct_has_kind_field(self):
+        h = _read_header()
+        m = re.search(r'typedef\s+struct\s*\{(.*?)\}\s*compliance_param_def_t', h, re.DOTALL)
+        assert m, "compliance_param_def_t struct not found"
+        body = m.group(1)
+        assert "compliance_kind_t" in body and "kind" in body
+
+    def test_PAR001_every_row_has_kind_tag(self):
+        kinds = _parse_table_kinds(_read_table_source())
+        for name in CANONICAL_KINDS:
+            assert name in kinds, f"{name} row missing kind tag"
+            assert kinds[name] in {"CAPPED", "LOCKED"}
+
+
+class TestPAR001_CanonicalSixClassification:
+    """Each of the canonical 6 has the kind ADR-020 specifies."""
+
+    def test_PAR001_canonical_six_classification(self):
+        kinds = _parse_table_kinds(_read_table_source())
+        mismatches = []
+        for name, expected in CANONICAL_KINDS.items():
+            got = kinds.get(name)
+            if got != expected:
+                mismatches.append(f"{name}: expected {expected}, got {got}")
+        assert not mismatches, "Kind classification wrong: " + "; ".join(mismatches)
+
+
+class TestPAR001_LockedSemantics:
+    """LOCKED rows behave as ADR-020 prescribes (source-level checks)."""
+
+    def test_PAR001_within_cap_rejects_locked_mismatch_via_memcmp(self):
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.cpp")
+        m = re.search(r'if\s*\(def->kind\s*==\s*COMPLIANCE_KIND_LOCKED\)\s*\{(.*?)\}\s*\n', cpp, re.DOTALL)
+        assert m, "LOCKED branch in param_check_within_cap not found (ADR-020)"
+        body = m.group(1)
+        assert "memcmp" in body, "LOCKED match check must use memcmp (-Wfloat-equal)"
+
+    def test_PAR001_first_unset_skips_locked(self):
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.cpp")
+        m = re.search(r'const char \*param_compliance_first_unset\(void\)\s*\{(.*?)\n\}', cpp, re.DOTALL)
+        assert m, "param_compliance_first_unset definition not found"
+        body = m.group(1)
+        assert "COMPLIANCE_KIND_LOCKED" in body and "continue" in body
+
+    def test_PAR001_param_is_compliance_locked_exposed(self):
+        h = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.h")
+        assert "param_is_compliance_locked" in h
+
+    def test_PAR001_lazy_zero_returns_registered_for_locked(self):
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/parameters.cpp")
+        m = re.search(r'if\s*\(param_is_compliance_protected\(param\)\s*&&\s*!user_config\.contains\(param\)\)\s*\{(.*?)\}\s*\n\s*auto retrieve_value', cpp, re.DOTALL)
+        assert m, "lazy-zero block in param_get not found"
+        body = m.group(1)
+        assert "param_is_compliance_locked" in body
+        assert "param_get_compliance_ceiling" in body
+
+    def test_PAR001_locked_seed_function_not_needed(self):
+        h = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.h")
+        cpp = _wsl_read(f"{WSL_PARAMETERS}/compliance_check.cpp")
+        assert "param_seed_locked_at_boot" not in h, "ADR-020 uses lazy-zero, not boot-seed"
+        assert "param_seed_locked_at_boot" not in cpp
+

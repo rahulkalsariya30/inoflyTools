@@ -25,9 +25,12 @@ exact pass criterion.
 ## 2. Provision binary manifest to SITL storage
 
 - **Covers:** PRV001
-- **Action:** `py tools/provisioning/provision_sitl.py --manifest <path>`
-- **Pass:** `manifest.bin` written to both headless and Gazebo SITL
-  storage paths (501 bytes).
+- **Action:** `python3 tools/provisioning/provision_sitl.py` (no flags —
+  generates a manifest from the hardcoded `TEST_BUNDLE` and signs with
+  `pki/manufacturer/private/manufacturer_private.pem`).
+- **Pass:** `manifest.bin` written to both
+  `build/px4_sitl_default/inofly/manifest.bin` and
+  `build/px4_sitl_default/rootfs/inofly/manifest.bin` (501 bytes).
 
 ## 3. POST passes on boot
 
@@ -54,12 +57,11 @@ exact pass criterion.
   rejected with `Preflight Fail: Firmware integrity check failed`. A
   `POST_RESULT` audit entry is written with the failure detail.
 
-## 6. PAR001 — cap-semantics enforced (ADR-019)
+## 6. PAR001 — kind-aware enforcement (ADR-019 + ADR-020)
 
 - **Covers:** PAR001
-- **Action:** for each parameter in the canonical 6-list
-  (`GF_MAX_VER_DIST`, `GF_MAX_HOR_DIST`, `MPC_XY_VEL_MAX`,
-  `SYS_AUTOSTART`, `CA_AIRFRAME`, `MAV_SIGN_CFG`):
+- **Action — CAPPED rows** (`GF_MAX_VER_DIST` 120, `GF_MAX_HOR_DIST`
+  500, `MPC_XY_VEL_MAX` 15): for each:
   1. `param show <NAME>` immediately after boot → expect **0**.
   2. `param set <NAME> <value above ceiling>` → expect rejection
      with the ceiling included in the error message.
@@ -68,27 +70,51 @@ exact pass criterion.
      `param show <NAME>` returns that value.
   5. `param save` then reboot → `param show <NAME>` returns 0 again
      (autosave-skip works; values do not persist).
-  6. With at least one compliance param still 0, attempt to arm →
-     pre-arm rejects with the offending param name in the message.
+- **Action — LOCKED rows** (`SYS_AUTOSTART` 4001, `CA_AIRFRAME` 0,
+  `MAV_SIGN_CFG` 1): for each:
+  1. `param show <NAME>` immediately after boot → expect the
+     **registered value** (4001, 0, or 1 respectively), not 0. This
+     is the lazy-zero kind-aware read path.
+  2. `param set <NAME> <registered value>` → expect accept (no-op);
+     no audit entry.
+  3. `param set <NAME> <any other value>` → expect rejection with
+     detail `attempted=X registered=Y (LOCKED)`.
+  4. `param save` then reboot → `param show <NAME>` still returns
+     the registered value (not 0; LOCKED reads always pin).
+- **Action — pre-arm gate:** with at least one **CAPPED** param
+  still 0, attempt to arm via `commander arm`. The arm command itself
+  only prints a generic `Arming denied: Resolve system health failures
+  first` — to surface the actual blocking reason run `commander check`
+  at `pxh>`; it names the failing CAPPED param. (Also useful in step 5
+  to confirm POST is the blocker rather than unrelated SITL preflight
+  noise like GPS fix.)
+- **Pass:** `commander arm` rejected; `commander check` names a
+  CAPPED param (e.g. `GF_MAX_VER_DIST`). LOCKED rows do NOT appear in
+  the gate output (they always read as the registered value).
 
-## 7. PAR001 — over-cap violations logged to audit log
+## 7. PAR001 — violations logged to audit log
 
 - **Covers:** PAR001 + LOG001 wiring
-- **Action:** after step 6 (the over-cap rejection in 6.2), inspect
-  the live audit log via QGC Audit Log panel.
-- **Pass:** one `COMPLIANCE_PARAM_VIOLATION` entry per over-cap
-  attempt with the ceiling value in the message, sequence numbers
-  monotonically increasing, signed (`audit_log.sig` regenerated).
-  Successful within-cap sets from step 6.3/6.4 produce **no** audit
-  entry — that is by design (ADR-019: audit log records security
-  events only).
+- **Action:** after step 6 (the rejections in 6.CAPPED.2 and
+  6.LOCKED.3), inspect the live audit log via QGC Audit Log panel.
+- **Pass:**
+  - One `COMPLIANCE_PARAM_VIOLATION` entry per **CAPPED over-cap**
+    attempt, detail `attempted=X ceiling=Y`.
+  - One `COMPLIANCE_PARAM_VIOLATION` entry per **LOCKED mismatched**
+    write, detail `attempted=X registered=Y (LOCKED)`.
+  - **No** entry for successful CAPPED within-cap sets (6.CAPPED.3/4).
+  - **No** entry for LOCKED writes where `attempted == registered`
+    (6.LOCKED.2 — semantic no-op).
+  - Sequence numbers monotonically increasing; `audit_log.sig`
+    regenerated. (ADR-019 + ADR-020: audit log records security
+    events only.)
 
 ## 8. PAIR001 — MAVLink signing required
 
 - **Covers:** PAIR001
 - **Action:**
   1. Provision signing key:
-     `py tools/provisioning/provision_signing_key.py --drone-id <id> --passphrase dgca_sitl_test`
+     `python3 tools/provisioning/provision_signing_key.py --drone-id <id> --passphrase dgca_sitl_test`
   2. Connect QGC with the **wrong** passphrase → confirm no telemetry.
   3. Connect QGC with the **right** passphrase → confirm full link.
 - **Pass:** unsigned/wrong-key messages are silently dropped on the FC
@@ -115,7 +141,7 @@ exact pass criterion.
 - **Action:** download `audit_log.bin` and `audit_log.sig` via QGC
   Audit Log panel, then run:
   ```
-  py tools/verify_audit_log.py \
+  python3 tools/verify_audit_log.py \
       --log Docs/audit_log.bin \
       --sig Docs/audit_log.sig \
       --key pki/manufacturer/private/manufacturer_private.pem
