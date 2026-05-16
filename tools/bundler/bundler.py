@@ -23,12 +23,26 @@ BUNDLE FORMAT:
   Contents:
     firmware.px4          — the firmware binary (copy of the original .px4)
     signed_manifest.json  — signed manifest from Phase 1.3 (signer.py)
+    update_manifest.bin   — 373-byte security_manifest_t for UPD001 flow
+                            (RSA-PSS-signed over the 98-byte fixed payload;
+                            uploaded to the FC's SD card and verified by
+                            FirmwareUpdateGatekeeper). See security_manifest.h.
     bundle_info.json      — top-level metadata (version, board, created_at)
+
+WHY two manifests?
+  signed_manifest.json    is JSON, signed over canonicalized JSON bytes.
+                          Used by QGC for client-side authenticity check.
+  update_manifest.bin     is the fixed-layout binary the FC's gatekeeper
+                          reads. Its signature covers a 98-byte payload
+                          (code_hash + data_hash + board_id + version), NOT
+                          the JSON bytes. The drone never parses JSON; the
+                          bundler bakes the binary form so QGC just FTPs it.
 
 VENDOR WORKFLOW:
   Manufacturer runs: keygen → checksum → sign → package (this tool)
   Vendor receives:   firmware_v1.14.0_cubeorange.fwbundle
-  QGC plugin (Phase 4) opens bundle, verifies signature, flashes firmware
+  QGC plugin opens bundle, verifies signature, uploads binary manifest +
+  triggers `secure_boot verify_update` on the FC (UPD001 flow).
 """
 
 import json
@@ -40,14 +54,18 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tools.signer.signer import verify_bundle as _verify_signed_bundle, load_signed_bundle
+from tools.provisioning.export_manifest import export_binary_manifest
+from tools.pki.keygen import PRIVATE_KEY_PATH as _DEFAULT_PRIVATE_KEY_PATH
 
-BUNDLER_VERSION = "1.0.0"
+# 1.1.0 — bundles now include update_manifest.bin (UPD001 / FC gatekeeper).
+BUNDLER_VERSION = "1.1.0"
 
 
 def create_bundle(
     px4_path: Path,
     signed_manifest: dict,
     output_path: Path,
+    private_key_path: Path = _DEFAULT_PRIVATE_KEY_PATH,
 ) -> Path:
     """
     Package a firmware file and its signed manifest into a .fwbundle file.
@@ -86,6 +104,15 @@ def create_bundle(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
+    # Build the binary security_manifest_t the FC's FirmwareUpdateGatekeeper reads.
+    # This is a separate RSA-PSS signature over the 98-byte fixed-layout payload
+    # (code_hash + data_hash + board_id + version) — distinct from the JSON
+    # manifest's signature, which is over the canonicalized JSON. The drone
+    # never parses JSON; this binary is what gets FTP-uploaded by QGC during
+    # the UPD001 install flow.
+    binary_manifest = export_binary_manifest(signed_manifest, private_key_path)
+    assert len(binary_manifest) == 373, f"binary manifest size wrong: {len(binary_manifest)}"
+
     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         # Store firmware binary
         zf.write(px4_path, arcname="firmware.px4")
@@ -95,6 +122,9 @@ def create_bundle(
             "signed_manifest.json",
             json.dumps(signed_manifest, indent=4)
         )
+
+        # Store the FC-facing binary manifest (UPD001 / gatekeeper input)
+        zf.writestr("update_manifest.bin", binary_manifest)
 
         # Store bundle info (human-readable summary at top level)
         zf.writestr(
@@ -106,6 +136,7 @@ def create_bundle(
     print(f"     Firmware:        {px4_path.name}")
     print(f"     Version:         {bundle_info['firmware_version']}")
     print(f"     Board ID:        {bundle_info['board_id']}")
+    print(f"     update_manifest.bin: 373 bytes (FC gatekeeper input)")
     return output_path
 
 
@@ -128,8 +159,10 @@ def verify_bundle(bundle_path: Path, public_key_path: Path) -> bool:
     with zipfile.ZipFile(bundle_path, "r") as zf:
         names = zf.namelist()
 
-        # Check all expected files are present
-        for required_file in ["firmware.px4", "signed_manifest.json", "bundle_info.json"]:
+        # Check all expected files are present. update_manifest.bin is
+        # required for v1.1.0+ bundles (carries the FC-facing binary manifest).
+        for required_file in ["firmware.px4", "signed_manifest.json",
+                              "update_manifest.bin", "bundle_info.json"]:
             if required_file not in names:
                 raise ValueError(
                     f"Bundle is missing '{required_file}'. "
