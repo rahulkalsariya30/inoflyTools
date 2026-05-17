@@ -30,7 +30,14 @@ exact pass criterion.
   `pki/manufacturer/private/manufacturer_private.pem`).
 - **Pass:** `manifest.bin` written to both
   `build/px4_sitl_default/inofly/manifest.bin` and
-  `build/px4_sitl_default/rootfs/inofly/manifest.bin` (501 bytes).
+  `build/px4_sitl_default/rootfs/inofly/manifest.bin` (373 bytes —
+  the size of `security_manifest_t` after the v1.1.0 / ADR-018 split).
+  Both copies must be byte-identical (md5sum-equal).
+- **Note on SITL cwd:** `make px4_sitl none_iris` sets cwd to
+  `build/px4_sitl_default/rootfs/`, so the live FC reads/writes
+  `rootfs/inofly/`. The non-rootfs `inofly/` is a residue path from
+  older `PX4_SIM_MODEL=shell` runs; it can be stale. Always inspect the
+  `rootfs/inofly/` copy when checking live FC state during a walkthrough.
 
 ## 3. POST passes on boot
 
@@ -152,27 +159,80 @@ exact pass criterion.
 ## 11. UPD001 — accept correctly signed firmware bundle
 
 - **Covers:** UPD001 (positive path), PKG001
+- **Prereq:** the gitignored test fixtures must be at the current bundle
+  format (regenerate after any bundler format bump):
+  `py -3 tools/regenerate_test_fixtures.py`. Expect
+  `test_firmware.fwbundle verify=PASS` and
+  `test_firmware_tampered.fwbundle verify=FAIL`.
 - **Action:** in QGC, open SecureFirmwareUpdatePage and upload
-  [test_firmware.fwbundle](../test_firmware.fwbundle).
-- **Pass:** QGC client-side verification passes; bundle uploaded to FC
-  via MAVLink FTP; FC `FirmwareUpdateGatekeeper` reports CRC + RSA-PSS
-  pass and authorizes the staged manifest. A `FW_UPDATE` audit entry is
-  logged with result=accepted.
+  [test_firmware.fwbundle](../test_firmware.fwbundle). Then click
+  **Install on Drone** (Section 4.5 — gated on `verificationState ===
+  Verified`).
+- **Pass:**
+  - QGC client-side: signature **VERIFIED** (green).
+  - Install state machine reaches **ACCEPTED** within 15s.
+  - On FC SD, `rootfs/inofly/update_manifest.bin` exists, **373 bytes**,
+    timestamp fresh.
+  - **MD5 cross-check** — the MD5 of `update_manifest.bin` on the FC
+    SD equals the MD5 of `update_manifest.bin` inside the bundle:
+    ```
+    py -3 -c "import zipfile,hashlib; \
+        d=zipfile.ZipFile('test_firmware.fwbundle').read('update_manifest.bin'); \
+        print(hashlib.md5(d).hexdigest())"
+    md5sum ~/PX4-Autopilot/build/px4_sitl_default/rootfs/inofly/update_manifest.bin
+    ```
+    Equal MD5 proves the staged manifest is bit-identical to what the
+    manufacturer signed — no MAVLink-FTP corruption.
+  - One `UPDATE_ATTEMPT` audit entry with result=SUCCESS; `entry_count`
+    grows by exactly 1.
 
-## 12. UPD001 — reject tampered/unsigned bundle at the drone
+## 12. UPD001 — reject tampered/unsigned bundle (both paths)
 
-- **Covers:** UPD001 (negative path) — drone-side, not just QGC
-- **Action:** upload [test_firmware_tampered.fwbundle](../test_firmware_tampered.fwbundle).
-- **Pass:** QGC rejects client-side. Then bypass QGC verification (or
-  use the raw upload path) and confirm the drone *still* rejects.
-  `FirmwareUpdateGatekeeper` reports signature mismatch; no flash
-  authorization granted; `FW_UPDATE` audit entry logged with
-  result=rejected and reason code populated.
+- **Covers:** UPD001 (negative path) — both QGC client-side AND drone-side
+- The two paths verify different artifacts and must be exercised
+  separately:
+
+### 12.A — QGC client-side reject
+
+- **Action:** in QGC, **Clear** any loaded bundle, then **Browse...** and
+  pick [test_firmware_tampered.fwbundle](../test_firmware_tampered.fwbundle)
+  (the regen tool corrupts one base64 char of the manifest signature).
+- **Pass:**
+  - Signature Verification turns **red FAILED**.
+  - Section 4.5 "Install on Drone" is **hidden** (gated on Verified).
+  - QGC never uploads to FC. `secure_boot audit_status` `entry_count`
+    is unchanged.
+
+### 12.B — FC drone-side reject (bypass QGC, tamper SD directly)
+
+This simulates an attacker who corrupts the staged `update_manifest.bin`
+on the SD card after a legitimate stage (e.g. SD card swap).
+
+- **Prereq:** Step 11 completed, so a valid `update_manifest.bin` is
+  staged on `rootfs/inofly/`.
+- **Action:** flip one byte inside the CRC-covered region of
+  `update_manifest.bin`:
+  ```
+  python3 -c "
+  p='/home/$USER/PX4-Autopilot/build/px4_sitl_default/rootfs/inofly/update_manifest.bin'
+  d=bytearray(open(p,'rb').read()); d[50] ^= 0xFF
+  open(p,'wb').write(d)"
+  ```
+  Then at `pxh>`: `secure_boot verify_update`.
+- **Pass:**
+  - Output shows `CRC mismatch (stored=0x... computed=0x...)` and
+    `UPD001: update REJECTED (reason=2)`.
+  - No `signature VERIFIED` line.
+  - New `UPDATE_ATTEMPT` audit entry with result=FAILURE.
+  - `entry_count` grows by exactly 1.
+- **Cleanup:** at `pxh>` run `secure_boot clear_update` to drop the
+  failed staging state before next session.
 
 ---
 
 ## Pre-hardware sign-off
 
 All 12 steps must show ✅ before kicking off the CubeOrange+ build.
-Steps 1–9 are verified as of 2026-04-28. Steps 10–12 are the remaining
-gates.
+**All 12 steps verified end-to-end on 2026-05-17** under PX4 fork
+`f3408a16e5` (inofly-par001-merge) + inoflyTools `02f221b` + inoflyGCU
+QGC fork `14a61e4b2`. Next gate is hardware Tier 1.

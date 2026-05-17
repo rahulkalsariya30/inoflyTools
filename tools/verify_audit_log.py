@@ -4,7 +4,7 @@ tools/verify_audit_log.py
 Offline verification of a drone-produced audit log.
 
 The flight controller signs the audit log per the audited reference Section 8:
-  1. FC writes 132-byte entries to audit_log.bin (signature field zero, CRC32 only).
+  1. FC writes 316-byte entries to audit_log.bin (signature field zero, CRC32 only).
   2. After each write, FC computes SHA-256 of the complete audit_log.bin.
   3. FC encrypts the 32-byte hash with the embedded RSA-2048 PUBLIC key
      (PKCS#1 v1.5) and writes 256 bytes to audit_log.sig.
@@ -52,7 +52,7 @@ def verify(log_path: Path, sig_path: Path, key_path: Path) -> bool:
         return False
 
     print(f"  log file:        {log_path}  ({len(log_data)} bytes, "
-          f"{len(log_data) // 132} entries)")
+          f"{len(log_data) // 316} entries)")
     print(f"  expected SHA-256: {expected.hex()}")
     print(f"  decrypted hash:   {decrypted.hex()}")
 
