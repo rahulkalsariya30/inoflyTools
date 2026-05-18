@@ -230,9 +230,78 @@ on the SD card after a legitimate stage (e.g. SD card swap).
 
 ---
 
+## 13. Attacker-key reinforcement (recommended, not required for §1–§12 sign-off)
+
+Steps §5 and §12.B exercise the negative path via byte-flips, which
+fail at the CRC check (`reason=2`) before the signature branch even
+runs. This section reinforces the model with manifests/bundles that
+are **correctly signed but with a non-manufacturer (attacker) keypair**.
+CRC is valid; only the RSA-PSS signature verification against the
+embedded manufacturer public key fails — confirming the signature
+branch isn't dead code, and surfacing the **distinct sig-mismatch
+reason code (`reason=3`)** that byte-flip tests never reach.
+
+**Prereq:** generate fresh attacker fixtures
+```
+py -3 tools/regenerate_attacker_fixtures.py
+```
+Output lands in `.attacker_fixtures/` (gitignored). Tool runs a
+cross-key sanity check at generation time — if any artifact verifies
+under the manufacturer public key, generation aborts.
+
+### 13.A — POST signature-mismatch (`manifest.bin`)
+
+- **Action:** stop SITL, back up the good `manifest.bin` from
+  `rootfs/inofly/` (and the non-rootfs `inofly/` copy), drop in
+  `.attacker_fixtures/attacker_manifest.bin`, restart SITL, run
+  `secure_boot start`.
+- **Pass:**
+  - `secure_boot: manifest signature invalid` (note: signature, not CRC)
+  - `POST FAILED (reason=3)` — distinct from CRC's `reason=2`
+  - `firmware_integrity_status.failure_reason=3`
+  - `commander check` lists `Firmware integrity check failed (reason=3)`
+  - `commander arm` denied
+- **Restore** good `manifest.bin`, restart, confirm POST passes again.
+
+### 13.B — QGC client-side reject (attacker bundle)
+
+- **Action:** in QGC, **Clear** the loaded bundle, then **Browse...**
+  and pick `.attacker_fixtures/attacker_firmware.fwbundle`.
+- **Pass:** identical UX to §12.A — red **FAILED — Signature invalid**,
+  DGCA warning shown, Section 4.5 hidden, no FC upload.
+
+### 13.C — FC `verify_update` signature-mismatch
+
+- **Action:** copy `.attacker_fixtures/attacker_update_manifest.bin`
+  in place of `rootfs/inofly/update_manifest.bin`, then at `pxh>`
+  run `secure_boot clear_update; secure_boot verify_update`.
+- **Pass:**
+  - Output shows `RSA-PSS signature verification FAILED` (not CRC)
+  - `UPD001: update REJECTED (reason=3)` — distinct from §12.B's `reason=2`
+  - New `UPDATE_ATTEMPT` FAILURE audit entry; `detail` carries the
+    reason code
+- **Cleanup:** `secure_boot clear_update` + `rm rootfs/inofly/update_manifest.bin`.
+
+### Why this matters
+
+Without §13, the negative-path tests only exercise the CRC layer.
+Several real failure modes — wrong manufacturer key flashed during
+provisioning, attacker who recomputes CRC after substituting their
+own signed manifest, mistakenly-signed update bundles — would not
+have been exercised. A single fixture bug in
+`regenerate_attacker_fixtures.py` was caught only by running §13.C
+(false-passed on first run because `create_bundle()`'s
+`private_key_path` defaulted to the manufacturer key for
+`update_manifest.bin`). The strengthened sanity guard in the regen
+tool now prevents that regression.
+
+---
+
 ## Pre-hardware sign-off
 
 All 12 steps must show ✅ before kicking off the CubeOrange+ build.
 **All 12 steps verified end-to-end on 2026-05-17** under PX4 fork
 `f3408a16e5` (inofly-par001-merge) + inoflyTools `02f221b` + inoflyGCU
-QGC fork `14a61e4b2`. Next gate is hardware Tier 1.
+QGC fork `14a61e4b2`. §13 attacker-key reinforcement also run the same
+day and passes (reason=3 in both POST and `verify_update`). Next gate
+is hardware Tier 1.

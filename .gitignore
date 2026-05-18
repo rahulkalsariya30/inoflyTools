@@ -65,6 +65,8 @@ Docs/compliance_report.json
 Docs/compliance_report.txt
 Docs/audit_log.bin
 Docs/audit_log.sig
+.attacker_fixtures/
+.fixture_workdir/
 
 # =============================================================
 # Third-party reference / confidential docs (do not commit)
