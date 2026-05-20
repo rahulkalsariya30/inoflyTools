@@ -297,11 +297,147 @@ tool now prevents that regression.
 
 ---
 
+## 14. Hash-mismatch reason-code coverage (recommended, not required for §1–§12 sign-off)
+
+Steps §5 / §12.B exercise `reason=2` (manifest CRC) and §13 exercises
+`reason=3` (signature). Two reason codes remain unexercised:
+`REASON_CODE_HASH_MISMATCH = 4` and `REASON_DATA_HASH_MISMATCH = 5`.
+These would fire if the manifest's `code_hash` / `data_hash` did not
+match the SHA-256 of the running ELF's code / data ranges.
+
+**Why this can't be provoked organically in SITL:** the POSIX branches
+of `FirmwareIntegrityChecker::_verify_code_hash` and `_verify_data_hash`
+([FirmwareIntegrityChecker.cpp:217-263](../../PX4-Autopilot/src/modules/secure_boot/FirmwareIntegrityChecker.cpp))
+short-circuit to `return true` — SITL has no real flash layout to slice.
+The hash-compute path itself is hardware-side and is unit-tested
+separately. What §14 verifies is the **reason-code plumbing** end-to-end
+through `firmware_integrity_status`, `commander check`, and the audit
+log — i.e. that reasons 4 and 5 reach the operator and the audit trail
+in the same shape as reasons 2 and 3.
+
+The probe is a one-line stub flip in the PX4 fork, rebuilt and
+restored after each sub-step.
+
+### 14.A — Forced `code_hash` mismatch (reason=4) — ✅ PASS 2026-05-19
+
+- **Setup:**
+  ```
+  cd ~/PX4-Autopilot
+  # In src/modules/secure_boot/FirmwareIntegrityChecker.cpp, inside
+  # _verify_code_hash, flip the __PX4_POSIX branch (≈ line 221):
+  #     return true;   →   return false;
+  make px4_sitl none_iris
+  ```
+- **Action:** start SITL, `secure_boot start`.
+- **Pass:**
+  - Log shows `ERROR secure_boot: firmware code hash mismatch`
+    (the PX4_ERR that precedes setting reason=4 —
+    [FirmwareIntegrityChecker.cpp:326-329](../../PX4-Autopilot/src/modules/secure_boot/FirmwareIntegrityChecker.cpp#L326-L329))
+  - `WARN secure_boot: POST FAILED (reason=4)` — distinct from reasons 2 and 3
+  - `firmware_integrity_status`: `check_passed: False`, `failure_reason: 4`
+  - `commander check` → FAILED, lists `Firmware integrity check failed (reason=4)`
+  - `commander arm` denied (`Arming denied: Resolve system health failures first`)
+  - Exactly one new `POST_RESULT` audit entry (`type=1 result=1`) is
+    logged. (Two `ARMING_BLOCKED` entries — `type=3 result=1` — are also
+    logged either side of it; those are the health-check subsystem firing
+    on its periodic arming evaluation, not a POST event. So `entry_count`
+    grows by 3 per `secure_boot start` here, with one POST_RESULT FAILURE
+    among them.)
+- **Observed 2026-05-19** (PX4 fork `f3408a16e5`): `ERROR firmware code
+  hash mismatch` → `POST FAILED (reason=4)`; `failure_reason: 4`;
+  `commander check` FAILED with reason=4; arm denied; audit `POST_RESULT`
+  FAILURE at seq=48. ✅
+- **Restore:**
+  ```
+  cd ~/PX4-Autopilot
+  git restore src/modules/secure_boot/FirmwareIntegrityChecker.cpp
+  make px4_sitl none_iris
+  ```
+  Restart SITL, `secure_boot start`, confirm POST PASS again before
+  moving to 14.B. (Observed: `all integrity checks passed` / `POST
+  passed`; audit `POST_RESULT` SUCCESS `type=1 result=0` at seq=51. ✅)
+
+### 14.B — Forced `data_hash` mismatch (reason=5) — ✅ PASS 2026-05-19
+
+- **Setup:** same file, this time flip *only* the `__PX4_POSIX` branch of
+  `_verify_data_hash` (≈ line 243), leaving `_verify_code_hash` at
+  `return true` so POST reaches the data-hash check:
+  ```
+  return true;   →   return false;
+  ```
+  Rebuild SITL.
+- **Action:** start SITL, `secure_boot start`.
+- **Pass:**
+  - Log shows `ERROR secure_boot: firmware data hash mismatch`
+  - `WARN secure_boot: POST FAILED (reason=5)` — distinct from reasons 2, 3, 4
+  - `firmware_integrity_status`: `check_passed: False`, `failure_reason: 5`
+  - `commander check` → FAILED, lists `Firmware integrity check failed (reason=5)`
+  - `commander arm` denied
+  - One new `POST_RESULT` audit entry (`type=1 result=1`); same
+    `ARMING_BLOCKED` noise as 14.A.
+- **Observed 2026-05-19** (PX4 fork `f3408a16e5`): `ERROR firmware data
+  hash mismatch` → `POST FAILED (reason=5)`; `failure_reason: 5`;
+  `commander check` FAILED with reason=5; arm denied; audit `POST_RESULT`
+  FAILURE at seq=53. Because code_hash passed first and data_hash failed,
+  this also confirms the short-circuit ordering (see "Order matters"). ✅
+- **Restore:** `git restore` the file and rebuild. Confirm POST PASS.
+
+### Notes
+
+- **Order matters.** `_verify_code_hash` runs before `_verify_data_hash`
+  in [FirmwareIntegrityChecker.cpp:326-336](../../PX4-Autopilot/src/modules/secure_boot/FirmwareIntegrityChecker.cpp#L326-L336),
+  so a forced code-hash fail short-circuits before the data-hash branch
+  ever runs. Run 14.A and 14.B as separate rebuilds; do not flip both
+  stubs at once. (Confirmed 2026-05-19: 14.B reached reason=5 only
+  because code_hash was left passing.)
+- **Secure-update path does NOT exercise these reason codes.** An earlier
+  draft of this note claimed `verify_update` reuses
+  `_verify_code_hash` / `_verify_data_hash` and could be made to reject
+  with reason=4/5 — that is **incorrect** and was removed 2026-05-19
+  after tracing the code. The hash helpers are called from exactly two
+  sites, both inside POST
+  ([FirmwareIntegrityChecker.cpp:326](../../PX4-Autopilot/src/modules/secure_boot/FirmwareIntegrityChecker.cpp#L326)
+  and [:332](../../PX4-Autopilot/src/modules/secure_boot/FirmwareIntegrityChecker.cpp#L332)).
+  The update gatekeeper
+  [`FirmwareUpdateGatekeeper::verifyAndAuthorize`](../../PX4-Autopilot/src/modules/secure_boot/FirmwareUpdateGatekeeper.cpp#L22)
+  never calls them — it checks staged-manifest-present → CRC32 → magic
+  bytes → RSA-PSS signature only. Its reject codes are a **separate enum**
+  ([FirmwareUpdateAuthorization.msg](../../PX4-Autopilot/msg/FirmwareUpdateAuthorization.msg)):
+  1 = no manifest, 2 = CRC corrupt, 3 = signature invalid,
+  4 = board_id mismatch (there is no 5). The "reason=4/5 = code/data
+  hash" mapping belongs only to the POST enum
+  (`firmware_integrity_status.failure_reason`). Signature (reason=3) is
+  the one code that means the same thing in both paths, which is why §13
+  legitimately exercises reason=3 in both POST and `verify_update`.
+- **Where update integrity is actually enforced.** `verify_update` is an
+  *authorization* gate, not an integrity-of-running-firmware gate — when
+  it runs, the new firmware is not yet installed, so there are no running
+  flash ranges to hash (and hashing the staged blob would just duplicate
+  the signature, which already covers the manifest's code_hash/data_hash
+  fields). Code/data-hash integrity of an *updated* firmware is enforced
+  on the next boot by two layers that are not `verify_update`:
+  (1) the **bootloader RSA-PSS check (BOOT001)** over the freshly-flashed
+  app-fw blob — a tampered image won't boot; (2) **POST (POST002/003)** in
+  the new firmware, which hashes the actual flash and compares to its
+  signed manifest (reasons 4/5 — the §14 path). So updates have no
+  code/data-hash coverage gap; that property lives in BOOT001 + POST.
+- **What §14 does NOT prove.** It does not prove the hash-compute
+  itself is correct — that's exercised only on hardware where real
+  flash ranges exist. §14 proves the POST reason codes 4 and 5 wire
+  through to the operator surfaces (`firmware_integrity_status`,
+  `commander check`/arm gate, audit log).
+
+---
+
 ## Pre-hardware sign-off
 
 All 12 steps must show ✅ before kicking off the CubeOrange+ build.
 **All 12 steps verified end-to-end on 2026-05-17** under PX4 fork
 `f3408a16e5` (inofly-par001-merge) + inoflyTools `02f221b` + inoflyGCU
 QGC fork `14a61e4b2`. §13 attacker-key reinforcement also run the same
-day and passes (reason=3 in both POST and `verify_update`). Next gate
-is hardware Tier 1.
+day and passes (reason=3 in both POST and `verify_update`). §14
+hash-mismatch reason-code coverage (POST reasons 4 and 5) verified
+2026-05-19 under PX4 fork `f3408a16e5` — both §14.A and §14.B pass; the
+verify_update side-check in the original §14 draft was dropped as based
+on a wrong premise (the update path does not check code/data hash — see
+§14 Notes). Next gate is hardware Tier 1.
