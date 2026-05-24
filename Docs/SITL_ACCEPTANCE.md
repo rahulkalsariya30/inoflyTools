@@ -32,7 +32,7 @@ exact pass criterion.
   `build/px4_sitl_default/inofly/manifest.bin` and
   `build/px4_sitl_default/rootfs/inofly/manifest.bin` (373 bytes —
   the size of `security_manifest_t` after the v1.1.0 / ADR-018 split).
-  Both copies must be byte-identical (md5sum-equal).
+  Both copies must be byte-identical (sha256sum-equal).
 - **Note on SITL cwd:** `make px4_sitl none_iris` sets cwd to
   `build/px4_sitl_default/rootfs/`, so the live FC reads/writes
   `rootfs/inofly/`. The non-rootfs `inofly/` is a residue path from
@@ -106,9 +106,14 @@ exact pass criterion.
   6.LOCKED.3), inspect the live audit log via QGC Audit Log panel.
 - **Pass:**
   - One `COMPLIANCE_PARAM_VIOLATION` entry per **CAPPED over-cap**
-    attempt, detail `attempted=X ceiling=Y`.
+    attempt; persisted detail is the **parameter name** only
+    (e.g. `GF_MAX_HOR_DIST`). The attempted/ceiling values appear on
+    the live `pxh>` console (step 6), not in the saved entry — DGCA
+    Level 1 needs the event + which parameter, not the value, and the
+    name always fits the 32-byte detail field (no truncation).
   - One `COMPLIANCE_PARAM_VIOLATION` entry per **LOCKED mismatched**
-    write, detail `attempted=X registered=Y (LOCKED)`.
+    write; persisted detail is the **parameter name** only
+    (e.g. `CA_AIRFRAME`).
   - **No** entry for successful CAPPED within-cap sets (6.CAPPED.3/4).
   - **No** entry for LOCKED writes where `attempted == registered`
     (6.LOCKED.2 — semantic no-op).
@@ -173,16 +178,19 @@ exact pass criterion.
   - Install state machine reaches **ACCEPTED** within 15s.
   - On FC SD, `rootfs/inofly/update_manifest.bin` exists, **373 bytes**,
     timestamp fresh.
-  - **MD5 cross-check** — the MD5 of `update_manifest.bin` on the FC
-    SD equals the MD5 of `update_manifest.bin` inside the bundle:
+  - **SHA-256 cross-check** — the SHA-256 of `update_manifest.bin` on the
+    FC SD equals the SHA-256 of `update_manifest.bin` inside the bundle:
     ```
     py -3 -c "import zipfile,hashlib; \
         d=zipfile.ZipFile('test_firmware.fwbundle').read('update_manifest.bin'); \
-        print(hashlib.md5(d).hexdigest())"
-    md5sum ~/PX4-Autopilot/build/px4_sitl_default/rootfs/inofly/update_manifest.bin
+        print(hashlib.sha256(d).hexdigest())"
+    sha256sum ~/PX4-Autopilot/build/px4_sitl_default/rootfs/inofly/update_manifest.bin
     ```
-    Equal MD5 proves the staged manifest is bit-identical to what the
-    manufacturer signed — no MAVLink-FTP corruption.
+    Equal SHA-256 proves the staged manifest is bit-identical to what the
+    manufacturer signed — no MAVLink-FTP corruption. (This is a transport
+    sanity check only; the staged manifest's authenticity/integrity is
+    enforced by its RSA-PSS/SHA-256 signature + CRC32, not by this diff.
+    No MD5/SHA-1 is used anywhere in the chain.)
   - One `UPDATE_ATTEMPT` audit entry with result=SUCCESS; `entry_count`
     grows by exactly 1.
 

@@ -608,14 +608,16 @@ class TestPAR001_ViolationDetailFormat:
         assert "(LOCKED)" in cpp, "LOCKED-kind detail string must include '(LOCKED)' marker (ADR-020)"
 
     def test_PAR001_guard_writes_details_to_audit_event(self):
-        """ComplianceParamGuard.cpp must copy the details string into
-        the security_audit_event_s::detail field — otherwise the
-        attempted+ceiling info never reaches audit_log.bin."""
+        """ComplianceParamGuard.cpp must write the violated parameter into
+        the security_audit_event_s::detail field so the blocked change
+        reaches audit_log.bin. (The persisted detail is the parameter NAME
+        only — it always fits the 32-byte field; the attempted/limit values
+        are shown on the live console, not saved.)"""
         cpp = _wsl_read(f"{WSL_SECURE_BOOT}/ComplianceParamGuard.cpp")
         # Callback signature wired through:
         assert "onViolation(const char *param_name, const char *details)" in cpp
-        # Details is composed into evt.detail somehow:
-        assert "details" in cpp and "evt.detail" in cpp
+        # The parameter name is written into evt.detail:
+        assert "evt.detail" in cpp and "param_name" in cpp
 
 
 # -- ADR-020 -- CAPPED/LOCKED kind split --

@@ -35,7 +35,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 # ── Constants matching security_audit_entry.h ─────────────────────────────────
 
 AUDIT_ENTRY_MAGIC  = 0x4C4F4701
-AUDIT_FORMAT_VER   = 1
+AUDIT_FORMAT_VER   = 2   # v2: timestamp_us is real UTC epoch us (v1 was boot-relative)
 AUDIT_DETAIL_LEN   = 32
 AUDIT_SIG_MAX_LEN  = 256
 AUDIT_ENTRY_SIZE   = 316
@@ -206,7 +206,7 @@ class TestLOG001EntryFormat:
         assert magic == AUDIT_ENTRY_MAGIC
 
     def test_LOG001_format_version(self):
-        """Format version must be 1."""
+        """Format version must be 2 (timestamp_us is real UTC epoch us)."""
         entry = _build_entry()
         assert entry[4] == AUDIT_FORMAT_VER
 

@@ -67,6 +67,7 @@ Docs/audit_log.bin
 Docs/audit_log.sig
 .attacker_fixtures/
 .fixture_workdir/
+.param_fixtures/
 
 # =============================================================
 # Third-party reference / confidential docs (do not commit)
