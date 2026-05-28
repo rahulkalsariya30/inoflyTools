@@ -86,6 +86,13 @@ Docs/Security Requirements.docx
 tools/cleanup_c_drive.ps1
 
 # =============================================================
+# Bench session build artifacts (release/ is the on-disk staging
+# dir for hardware bring-up — ELF/PX4/fwbundle/bin caught by globs
+# above, plus per-session manifest.json/signed.json/sd/ that aren't)
+# =============================================================
+release/
+
+# =============================================================
 # Local editor config
 # =============================================================
 .local-tooling/
