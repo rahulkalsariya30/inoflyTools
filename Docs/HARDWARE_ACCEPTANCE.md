@@ -129,23 +129,24 @@ committed, and pushed.
 | 2026-05-26 (offline) | BUG #1 fix (audit logger NuttX sync write path) committed as PX4 fork `e33eca2394`; BUG #2 fix (USB SIGN_OUTGOING exemption) as `5c5c79ba3d`. SITL 335/335 + integration green. | Both fixes ready for bench re-flash. |
 | 2026-05-27 (bench) | Re-flash + BUG #4 surfaced — POST stack overflow during libtomcrypt RSA verify. Fixed in same session (`STACK_MAIN 20480` + `static rsa_key`), committed as `fb2a628528`. | **H3 ✅** (POST verdict visible) **H7 ✅** (audit log persists 4 CRC-clean entries on real SD). BUG #3 surfaced — `.sig` file never written. |
 | 2026-05-28 (bench) | BUG #3 root cause: `arc4random_buf` hung on uninit `g_rng.rd_sem` because `up_randompool_initialize` was never called on this board. Fix = `CONFIG_DEV_URANDOM=y` + `CONFIG_DEV_URANDOM_RANDOM_POOL=y` + `CONFIG_BOARD_INITRNGSEED=y` + `board_init_rngseed()` seeding from STM32 96-bit MCU UID. Committed `a7ed0be789`. | **H10 ✅** (offline RSA verification PASSED end-to-end — see evidence under H10 below). LOG001 chain fully proven on hardware. |
+| 2026-05-28 EOD → 2026-05-29 IST early (bench, Day 5) | Re-provisioned manifest from `a7ed0be789` ELF; H3 reconfirmed on the new build; H4 substantively closed (hashes match manifest byte-for-byte); H5 PASS (tamper → reason=2 clean end-to-end). H6 attempted and **failed**: BUG #5 found — kind-aware PAR001 runtime hooks silent on NuttX (boot validation works, runtime `param_set`/`param_get` interception doesn't fire). Audit log itself confirms BUG #5 (zero `COMPLIANCE_PARAM_VIOLATION` entries despite two violating writes). BUG #3 fix re-validated under PASS→FAIL→PASS cycle with multiple `.sig` regenerations. No code changes this session. | **H4 ✅**, **H5 ✅** (audit log decoded auditor-grade — see evidence under H5 below). **H6 ❌ FAIL — BUG #5**. |
 
-### H-step status after Day 4 (2026-05-28)
+### H-step status after Day 5 (2026-05-28 EOD → 2026-05-29 IST early)
 
 | Step | Status | Closed on |
 |---|---|---|
 | **H0** board health | ✅ PASS | Day 1 (2026-05-25) |
 | **H1** flash secure_boot | ✅ PASS | Day 1 |
 | **H2** provision manifest | ✅ PASS | Day 1 |
-| **H3** POST verdict visible | ✅ PASS | Day 3 (after BUG #4 fix) |
-| **H4** `firmware_integrity_status` published | ⏸️ not formally captured (commander pre-arm gate behavior implies it works) |
-| **H5** tamper test reason=2 | ⏸️ not run on hardware (reason=4 verified organically Day 3) |
-| **H6** PAR001 kind-aware enforcement | ⏸️ not formally captured (params are read from `.compliance_params` table — implicit from POST passing) |
-| **H7** audit log persists on real SD | ✅ PASS | Day 3 (4 CRC-clean entries decoded auditor-grade) |
+| **H3** POST verdict visible | ✅ PASS | Day 3 (BUG #4 fix); reconfirmed Day 5 on `a7ed0be789` |
+| **H4** `firmware_integrity_status` published | ✅ PASS | Day 5 (code/data hashes match manifest byte-for-byte; 2 caveats — see H4 below) |
+| **H5** tamper test reason=2 | ✅ PASS | Day 5 (CRC mismatch detected, arming blocked, audit entry logged) |
+| **H6** PAR001 kind-aware enforcement | ❌ **FAIL** | Day 5 — blocked by **BUG #5** (runtime hooks not wired on hardware) |
+| **H7** audit log persists on real SD | ✅ PASS | Day 3; extended Day 5 across PASS/FAIL/PASS cycle |
 | **H8** PAIR001 MAVLink signing | ⏸️ not started — needs SiK telemetry; PAIR001 hardware coverage gap |
 | **H9** live panel + auto-FTP | ⏸️ not run on hardware (works in SITL since 2026-05-24) |
-| **H10** offline RSA-2048 sig verification | ✅ PASS | Day 4 (2026-05-28) |
-| **H11–H15** | ⏸️ not started — gated by manifest re-provisioning + bigger test scenarios |
+| **H10** offline RSA-2048 sig verification | ✅ PASS | Day 4 (1-entry); re-proven Day 5 on 3-entry multi-event log |
+| **H11–H15** | ⏸️ not started — gated by H6/BUG #5 cleared + bigger test scenarios |
 
 H10 evidence — actual session output, manufacturer private key,
 real `audit_log.bin` + `audit_log.sig` pulled from CubeOrange+ SD
@@ -181,6 +182,123 @@ recovers the FC's signed SHA-256 and verifies it matches the log
 content byte-for-byte. The decoded entry is auditor-readable and
 correctly reflects the bench reality (POST failed against the
 stale-for-this-build manifest, reason aligns with `[POST002]`).
+
+### Day 5 evidence — H4, H5, and the BUG #5 discovery
+
+**H4 — `firmware_integrity_status` published with real values.** After
+re-provisioning the manifest from the `a7ed0be789` ELF and running
+`secure_boot start`:
+
+```
+nsh> listener firmware_integrity_status
+TOPIC: firmware_integrity_status
+  check_passed: True
+  failure_reason: 0
+  code_hash: [55, 191, 183, 193, 52, 241, 26, 52, ...]
+  data_hash: [238, 95, 147, 247, 13, 139, 44, 26, ...]
+  board_id: 39
+```
+
+The first eight bytes of `code_hash` decode to `37 bf b7 c1 34 f1 1a 34`
+and `data_hash` to `ee 5f 93 f7 0d 8b 2c 1a` — **exact byte-for-byte
+match** to what `tools/pipeline.py --elf` computed at provisioning
+time. First end-to-end evidence on this build that real-flash hashing
+on hardware reproduces the manifest values (OpenSSL→libtomcrypt interop
+proven on multi-megabyte flash ranges).
+
+Two caveats flagged for follow-up (don't block H4):
+
+1. **`board_id: 39`** — the compiled `SECURE_BOOT_BOARD_ID = 1063`, and
+   `1063 & 0xFF = 39`. The on-device gate uses the constant, not this
+   field (otherwise POST would reject reason=6), so the field is
+   display-only — but the truncation suggests the `uORB` msg has the
+   field as `uint8`. Should be widened. Not a security regression.
+2. **`boot_count` and `manifest_version` not published** despite this
+   doc claiming they are. Either the `firmware_integrity_status.msg`
+   doesn't carry them or the `listener` only prints a subset. Worth a
+   one-line check of the `.msg` definition.
+
+**H5 — tamper test → reason=2, arming blocked.** Powered down, flipped
+one byte at offset 100 in `/fs/microsd/inofly/manifest.bin` on the SD
+card (inside the CRC-covered region), reinserted, booted, then
+`secure_boot start`:
+
+```
+ERROR [secure_boot] Firmware manifest is corrupt - checksum mismatch
+                   (stored=0x84CEAB36 computed=0xAE12E80B)
+WARN  [secure_boot] Pre-operational self-test FAILED - firmware did not
+                   pass the integrity check; arming is blocked
+INFO  [secure_boot] Audit event recorded (type=1 result=1, #2)
+INFO  [secure_boot] Audit signature updated (256 bytes, covering 3 entries)
+
+nsh> listener firmware_integrity_status
+  check_passed: False
+  failure_reason: 2
+
+nsh> commander check    → Preflight check: FAILED
+nsh> commander arm      → denied (silent)
+```
+
+CRC mismatch caught **before** any signature or hash check — exactly
+the ordering ARM001/POST001 intends. Restoring the good manifest and
+rebooting returns POST to PASS, confirming the gate is data-driven, not
+sticky. Audit log grew 2→3 entries; the BUG #3 fix held under this
+FAIL-side `.sig` rewrite (previously: only proven on PASS side). Offline
+RSA verification of the 3-entry post-H5 log (re-running H10):
+
+```
+$ py tools/verify_audit_log.py --log release/sd/audit_log.bin \
+      --sig release/sd/audit_log.sig \
+      --key pki/manufacturer/private/manufacturer_private.pem
+  log file:        release\sd\audit_log.bin  (948 bytes, 3 entries)
+  expected SHA-256: 698c76f9c6b07558ed3b6b962942708290c1e7b36c9b449671247ace784f4608
+  decrypted hash:   698c76f9c6b07558ed3b6b962942708290c1e7b36c9b449671247ace784f4608
+PASS: audit log signature is authentic
+
+$ py tools/decode_audit_log.py release/sd/audit_log.bin
+#0  28 May 2026, 10:02:40 AM IST   POST FAILED - code hash mismatch       [POST002]
+#1  29 May 2026, 02:03:07 AM IST   POST passed - firmware verified        [POST001/002/003]
+#2  29 May 2026, 02:17:31 AM IST   POST FAILED - manifest CRC failed      [POST001]
+Status: OK - every entry parsed and passed CRC.
+```
+
+H7 + H10 simultaneously extended: multi-event log, mixed PASS/FAIL,
+`.sig` recovers byte-for-byte. The H5 entry is rendered auditor-grade
+in plain English.
+
+**H6 = ❌ FAIL — BUG #5 surfaced.** With POST passing and the
+`.compliance_params` table loaded (boot validation printed all 6
+protected params with correct ceilings/registered values), runtime
+enforcement was tested via nsh:
+
+| Attempt | Expected | Actual |
+|---|---|---|
+| `param show SYS_AUTOSTART` | `4001` (LOCKED lazy-zero read) | `0` |
+| `param set GF_MAX_VER_DIST 200` | REJECT — over cap 120 | **ACCEPTED** (curr 0 → new 200) |
+| `param set SYS_AUTOSTART 4002` | REJECT — `attempted=4002 registered=4001 (LOCKED)` | **ACCEPTED** (curr 4001 → new 4002) |
+
+The audit log's requirement-coverage table corroborates:
+`PAR001 / 7.1(c) ... no events recorded`. Two violating writes
+produced zero `COMPLIANCE_PARAM_VIOLATION` entries.
+
+**Diagnosis.** Boot-time `ComplianceParamGuard::validate_at_boot()`
+runs correctly — it reads the `.compliance_params` flash table
+directly. The runtime hooks into `param_set` / `param_get` that
+ADR-019/020 added are **not firing on hardware** despite passing SITL
+§6 (per memory 2026-05-11). Same class as BUG #1/#3: SITL clean,
+NuttX-path divergent. Likely candidates (to confirm offline):
+
+1. The hook registration in `ComplianceParamGuard::init()` is
+   `__PX4_POSIX`-gated and silently skipped on NuttX.
+2. The kind-aware patch in `src/lib/parameters/parameters.cpp` is
+   conditional on a config flag not set in `cubepilot_cubeorangeplus_default`.
+3. A `cdev`-vs-`parameter_client` divergence — the nsh `param` command
+   might take a path that bypasses the hook even when MAVLink wouldn't
+   (worth a MAVLink-side `PARAM_SET` cross-check next bench session).
+
+H6 blocks H11–H15 transitively (UPD001/PAR001 flows assume PAR001
+runtime enforcement). H7/H10 are unaffected — those are LOG001/POST,
+not PAR001.
 
 ---
 
@@ -604,17 +722,17 @@ provisioning per the Manufacturing Runbook.
 
 | Step | Result | Date | Notes |
 |---|---|---|---|
-| H0 board health | ⬜ | | |
-| H1 flash secure_boot | ⬜ | | |
-| H2 provision real manifest | ⬜ | | |
-| H3 POST pass (real hash) | ⬜ | | **milestone** |
-| H4 uORB real values | ⬜ | | |
-| H5 tamper → reason=2 | ⬜ | | |
-| H6 PAR001 enforcement | ⬜ | | |
-| H7 PAR001 audit (SD persist) | ⬜ | | |
-| H8 PAIR001 signing | ⬜ | | |
-| H9 live panel + backfill | ⬜ | | |
-| H10 offline sig verify | ⬜ | | |
+| H0 board health | ✅ | 2026-05-25 | Board ID 1063, IMUs live, PX4GUID `00060000000039333738333335112003d0036` |
+| H1 flash secure_boot | ✅ | 2026-05-25 | inofly-par001-merge, hash refreshed Day 5 to `a7ed0be789` |
+| H2 provision real manifest | ✅ | 2026-05-25 | 373 B; re-provisioned Day 5 from `a7ed0be789` ELF |
+| H3 POST pass (real hash) | ✅ | 2026-05-27 / 2026-05-28 Day 5 | **milestone** — reconfirmed on `a7ed0be789` |
+| H4 uORB real values | ✅ | 2026-05-28 Day 5 | hashes match manifest byte-for-byte; `board_id` uint8 truncation + missing `boot_count`/`manifest_version` flagged |
+| H5 tamper → reason=2 | ✅ | 2026-05-28 Day 5 | CRC stored vs computed mismatch logged, arm blocked, audit entry written |
+| H6 PAR001 enforcement | ❌ | 2026-05-28 Day 5 | **BUG #5** — runtime `param_set`/`param_get` hooks silent on hw (boot validation works) |
+| H7 PAR001 audit (SD persist) | ✅ | 2026-05-27 | extended Day 5 — `.sig` rewrites cleanly across PASS/FAIL/PASS |
+| H8 PAIR001 signing | ⬜ | | needs SiK telemetry |
+| H9 live panel + backfill | ⬜ | | works in SITL since 2026-05-24 |
+| H10 offline sig verify | ✅ | 2026-05-28 / Day 5 | re-proven on 3-entry multi-event log |
 | H11 UPD001 accept | ⬜ | | |
 | H12 UPD001 reject (A+B) | ⬜ | | |
 | H13 attacker-key reason=3 | ⬜ | | |
