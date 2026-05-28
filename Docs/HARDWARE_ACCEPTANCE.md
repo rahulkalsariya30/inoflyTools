@@ -118,6 +118,72 @@ Does **not** block H3 either way.
 
 ---
 
+## Progress after Day 1 (2026-05-26 → 2026-05-28)
+
+The Day 1 resume plan executed in three bench sessions. All four
+hardware-only bugs that surfaced (BUG #1/#2/#3/#4) are now closed,
+committed, and pushed.
+
+| Date | What happened | Result |
+|---|---|---|
+| 2026-05-26 (offline) | BUG #1 fix (audit logger NuttX sync write path) committed as PX4 fork `e33eca2394`; BUG #2 fix (USB SIGN_OUTGOING exemption) as `5c5c79ba3d`. SITL 335/335 + integration green. | Both fixes ready for bench re-flash. |
+| 2026-05-27 (bench) | Re-flash + BUG #4 surfaced — POST stack overflow during libtomcrypt RSA verify. Fixed in same session (`STACK_MAIN 20480` + `static rsa_key`), committed as `fb2a628528`. | **H3 ✅** (POST verdict visible) **H7 ✅** (audit log persists 4 CRC-clean entries on real SD). BUG #3 surfaced — `.sig` file never written. |
+| 2026-05-28 (bench) | BUG #3 root cause: `arc4random_buf` hung on uninit `g_rng.rd_sem` because `up_randompool_initialize` was never called on this board. Fix = `CONFIG_DEV_URANDOM=y` + `CONFIG_DEV_URANDOM_RANDOM_POOL=y` + `CONFIG_BOARD_INITRNGSEED=y` + `board_init_rngseed()` seeding from STM32 96-bit MCU UID. Committed `a7ed0be789`. | **H10 ✅** (offline RSA verification PASSED end-to-end — see evidence under H10 below). LOG001 chain fully proven on hardware. |
+
+### H-step status after Day 4 (2026-05-28)
+
+| Step | Status | Closed on |
+|---|---|---|
+| **H0** board health | ✅ PASS | Day 1 (2026-05-25) |
+| **H1** flash secure_boot | ✅ PASS | Day 1 |
+| **H2** provision manifest | ✅ PASS | Day 1 |
+| **H3** POST verdict visible | ✅ PASS | Day 3 (after BUG #4 fix) |
+| **H4** `firmware_integrity_status` published | ⏸️ not formally captured (commander pre-arm gate behavior implies it works) |
+| **H5** tamper test reason=2 | ⏸️ not run on hardware (reason=4 verified organically Day 3) |
+| **H6** PAR001 kind-aware enforcement | ⏸️ not formally captured (params are read from `.compliance_params` table — implicit from POST passing) |
+| **H7** audit log persists on real SD | ✅ PASS | Day 3 (4 CRC-clean entries decoded auditor-grade) |
+| **H8** PAIR001 MAVLink signing | ⏸️ not started — needs SiK telemetry; PAIR001 hardware coverage gap |
+| **H9** live panel + auto-FTP | ⏸️ not run on hardware (works in SITL since 2026-05-24) |
+| **H10** offline RSA-2048 sig verification | ✅ PASS | Day 4 (2026-05-28) |
+| **H11–H15** | ⏸️ not started — gated by manifest re-provisioning + bigger test scenarios |
+
+H10 evidence — actual session output, manufacturer private key,
+real `audit_log.bin` + `audit_log.sig` pulled from CubeOrange+ SD
+after BUG #3 fix flashed:
+
+```
+$ py tools/verify_audit_log.py \
+    --log release/sd/audit_log.bin \
+    --sig release/sd/audit_log.sig \
+    --key pki/manufacturer/private/manufacturer_private.pem
+  log file:        release\sd\audit_log.bin  (316 bytes, 1 entries)
+  expected SHA-256: 016dcee26f7e71f4c1600d3c6e90e3612ee8f095d0e7cddb79db395e457d2bb4
+  decrypted hash:   016dcee26f7e71f4c1600d3c6e90e3612ee8f095d0e7cddb79db395e457d2bb4
+PASS: audit log signature is authentic
+
+$ py tools/decode_audit_log.py release/sd/audit_log.bin
+Audit log: release\sd\audit_log.bin  (1 entries)
+========================================================================
+#0  28 May 2026, 10:02:40 AM IST (04:32:40 UTC)
+      Pre-operational self-test FAILED - the firmware code has changed
+      since it was signed (code hash mismatch); arming is blocked.
+      [POST001/POST002/POST003]
+      detail: "POST"
+      CRC OK
+------------------------------------------------------------------------
+Status: OK - every entry parsed and passed CRC.
+```
+
+This is the **canonical LOG001 / the audited reference §8 property** proven on
+hardware for the first time: the manufacturer, using only the
+offline private key and the downloaded `.bin` + `.sig` pair,
+recovers the FC's signed SHA-256 and verifies it matches the log
+content byte-for-byte. The decoded entry is auditor-readable and
+correctly reflects the bench reality (POST failed against the
+stale-for-this-build manifest, reason aligns with `[POST002]`).
+
+---
+
 This is the hardware-equivalent of [SITL_ACCEPTANCE.md](SITL_ACCEPTANCE.md).
 SITL proves the *wiring*; this checklist proves the parts that only exist
 on real silicon — **real flash-range hashing** (libtomcrypt over the
@@ -355,10 +421,11 @@ Where SITL says `pxh>`, hardware uses the `nsh>` / MAVLink Console prompt.
   `audit_log.bin` shown, sorted descending by `seq`, no dupes between
   backfill and the 10 Hz `INOFLY_AL` stream; new events appear live.
 
-## H10. Audit log — offline RSA-2048 signature verification
+## H10. Audit log — offline RSA-2048 signature verification ✅ PASS (2026-05-28)
 
 - **Covers:** LOG001 manufacturer-side verification.
-- **Action:** download `audit_log.bin` + `audit_log.sig` via QGC, then:
+- **Action:** download `audit_log.bin` + `audit_log.sig` via QGC (or
+  via SD pull), then:
   ```
   python tools/verify_audit_log.py \
       --log audit_log.bin --sig audit_log.sig \
@@ -367,6 +434,9 @@ Where SITL says `pxh>`, hardware uses the `nsh>` / MAVLink Console prompt.
 - **Pass:** `PASS: audit log signature is authentic`, exit 0. Decode is
   human-readable IST/UTC (AUDIT_FORMAT_VER 2):
   `python tools/decode_audit_log.py audit_log.bin`.
+- **Closed:** 2026-05-28 against the BUG #3 fix (PX4 fork
+  `a7ed0be789`). Actual session output captured in the post-Day-1
+  progress section above.
 
 ## H11. UPD001 — accept correctly signed bundle
 
