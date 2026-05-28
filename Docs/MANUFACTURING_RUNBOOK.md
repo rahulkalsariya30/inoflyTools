@@ -120,22 +120,36 @@ Time estimate: ~30 minutes per unit once Pre-flight is settled.
   (`MAVLink AUTOPILOT_VERSION` or the QGC summary panel).
 - Record `app_fw_version` in QMS.
 
-### Step 4 — Trigger `bl_update` to install secure bootloader
+### Step 4 — Install secure bootloader from SD (`bl_update`)
 
-- From QGC's MAVLink Console (or `mavproxy`), issue the
-  `flashbootloader` command. The running app fw extracts the
-  **secure bootloader** from its ROMFS and writes it to sector 0,
-  replacing the factory bootloader.
-- Wait for the flash operation to complete and the device to
-  reboot.
-- Observe boot progress LEDs / serial output to confirm the
-  secure bootloader is now running.
+> **AMENDED 2026-05-24 (ADR-022 executed).** The secure bootloader is
+> **no longer bundled in the app fw ROMFS** — it is installed from the SD
+> card as a one-shot. (The old flow issued `flashbootloader` and the app
+> fw extracted the bootloader from ROMFS; that path is retired because
+> the ROMFS bundle cost ~103 KB of app FLASH.)
 
-> **Important.** From this step onward, the unit's sector 0
-> contains our secure bootloader (BOOT001 + BOOT005 + embedded
-> manufacturer pubkey). DFU mode is now software-refused; `bl_update`
-> is the only sector-0 write path; SWD is still open until the seal
-> is applied in Step 8.
+- Place `secure_bootloader.bin` on the SD card (copy via card reader, or
+  upload via QGC MAVLink-FTP to `/fs/microsd/`). The canonical artifact
+  is `boards/cubepilot/cubeorangeplus/bootloader_artifact/cubepilot_cubeorangeplus_bootloader.bin`
+  in the PX4 fork — the BOOT001 bootloader with the embedded manufacturer
+  pubkey.
+- From QGC's MAVLink Console (or `nsh` over USB), run:
+  `bl_update /fs/microsd/cubepilot_cubeorangeplus_bootloader.bin`.
+  The running app fw validates the image header, erases sector 0, writes
+  the secure bootloader, and verifies (~5–10 s).
+- Wait for completion and reboot the device.
+- Observe boot progress LEDs / serial output to confirm the secure
+  bootloader is now running.
+- Delete `/fs/microsd/cubepilot_cubeorangeplus_bootloader.bin` after a
+  confirmed install (one-shot use).
+
+> **Important.** From this step onward, the unit's sector 0 contains our
+> secure bootloader (BOOT001 + BOOT005 + embedded manufacturer pubkey).
+> DFU mode is now software-refused; `bl_update` is the only sector-0
+> write path; SWD is still open until the seal is applied in Step 8.
+> Because the bootloader is no longer field-updatable via OTA (ADR-022),
+> a future bootloader change requires this same SD one-shot under a
+> broken-seal RMA.
 
 ### Step 5 — Verify secure bootloader hash
 

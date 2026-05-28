@@ -1543,6 +1543,17 @@ deployment can follow the same path.
 
 ### ADR-015 — bl_update / ROMFS-bundled bootloader as install path (2026-05-04, reverses 2026-05-03 disable)
 
+> ⚠️ **AMENDED 2026-05-24 by [ADR-022](#adr-022--bootloader-as-sd-card-one-shot-at-factory-executed-2026-05-24-2026-05-12-decided-amends-adr-015) (executed).**
+> The bootloader is **no longer bundled in app fw ROMFS** — it is
+> installed from the SD card via `bl_update /fs/microsd/...` as a factory
+> one-shot. This freed ~103 KB of app FLASH. The `bl_update` *command*
+> and the bootstrap-trust chain (BOOT001/005/006/007) are unchanged; only
+> the *binary's source* moved from ROMFS to SD. The ROMFS-bundling
+> mechanism described below is retained for history; see ADR-022 for the
+> current install path. **Trade-off (accepted):** the bootloader is now
+> effectively immutable post-manufacturing — field bootloader changes
+> require RMA.
+
 **Decision:** The secure bootloader binary is **bundled inside the
 application firmware as a ROMFS asset** (PX4's existing `bl_update`
 mechanism, ArduPilot equivalent). The first install — and any future
@@ -2409,13 +2420,21 @@ new architecture.
   cannot be disabled at runtime.
 - BOOT001 / BOOT006 / BOOT007 chain — unchanged.
 
-### ADR-022 — Bootloader as SD-card one-shot at factory (planned, not executed) (2026-05-12, amends ADR-015)
+### ADR-022 — Bootloader as SD-card one-shot at factory (EXECUTED 2026-05-24) (2026-05-12 decided, amends ADR-015)
 
-**Status:** Decided 2026-05-12, **not yet executed**. Recorded so the
-rationale and the verified PX4 bl_update behavior are captured;
-implementation deferred until the next FLASH-pressure event on the
-CubeOrange+ app firmware build. ADR-015 (bl_update / ROMFS-bundled
-bootloader as install path) remains in force until then.
+**Status:** ✅ **EXECUTED 2026-05-24.** Triggered by the predicted
+FLASH-pressure event: the readable-audit-log + Gazette 7.1(c) additions
+pushed the CubeOrange+ `cubepilot_cubeorangeplus_default` app fw 516
+bytes over its 1920 KB FLASH budget. Rather than strip a driver to
+recover ~5 KB, we executed this ADR to recover the ~103 KB the
+ROMFS-bundled bootloader was costing. **This amendment now supersedes
+ADR-015** — the secure bootloader is installed from SD, not from app fw
+ROMFS. (Inline "ROMFS-bundled bootloader" references elsewhere in this
+document predate this execution and are superseded by this ADR.)
+
+> **Decision originally recorded 2026-05-12, not-yet-executed.** The
+> rationale and the verified PX4 `bl_update` behavior below were captured
+> in advance; the section now reflects the as-executed mechanism.
 
 **Decision (when triggered).** The secure bootloader binary will no
 longer be bundled in the app firmware's ROMFS. Instead, at factory
@@ -2508,27 +2527,40 @@ RSA-2048).
 | Signed-only enforcement post-bootstrap | Unchanged | Unchanged |
 | Compliance posture vs. Gazette §7.1 | Compliant | Compliant — Gazette does not mandate field-updatable bootloader, only signed firmware updates |
 
-**Implementation surface (when executed).**
+**Implementation surface (as executed 2026-05-24).**
 
-- `~/PX4-Autopilot/boards/cubepilot/cubeorangeplus/default.px4board`:
-  disable the kconfig flag that bundles the bootloader binary into
-  ROMFS (likely `CONFIG_BOARD_BOOTLOADER_UPGRADE` or the equivalent;
-  exact symbol to be confirmed at execution time).
-- `~/PX4-Autopilot/boards/cubepilot/cubeorangeplus/init/rc.board_bootloader_upgrade`:
-  remove or no-op the boot-time auto-trigger (it would otherwise
-  silently skip itself when `/etc/extras/bootloader.bin` is absent,
-  but explicit removal is cleaner).
-- `tools/provisioning/`: add a small script wrapping the factory
-  sequence (steps 2–8 above) so manufacturing has a one-command flow.
-- `Docs/MANUFACTURING_RUNBOOK.md` (still to be authored under
-  BOOT007): includes the updated step ordering and the
-  signed-but-unverified app fw subtlety from step 2.
-- `secure_bootloader.bin`: produced by the existing bootloader build
-  pipeline (signer already targets it); just emitted as a standalone
-  artifact instead of being copied into the app fw's ROMFS staging.
-- No change to the bootloader source code itself.
-- No change to RSA-PSS signing infrastructure.
-- No change to QGC.
+- **The actual lever was not a kconfig flag.** [`ROMFS/CMakeLists.txt`](../../PX4-Autopilot/ROMFS/CMakeLists.txt)
+  (≈ lines 257-294) bundles the bootloader into ROMFS *only if* a file
+  named `${VENDOR}_${MODEL}_bootloader.bin` exists in the board's
+  `extras/` directory **and** `CONFIG_SYSTEMCMDS_BL_UPDATE` is set.
+  So the bundling is **file-presence driven**, not flag driven. We kept
+  `CONFIG_SYSTEMCMDS_BL_UPDATE=y` (the `bl_update` *command* is still
+  needed for the SD install) and simply **moved the binary out of
+  `extras/`**:
+  `git mv boards/cubepilot/cubeorangeplus/extras/cubepilot_cubeorangeplus_bootloader.bin`
+  `boards/cubepilot/cubeorangeplus/bootloader_artifact/`.
+  With no matching file in `extras/`, the ROMFS recipe skips both the
+  bootloader copy and the `rc.board_bootloader_upgrade` auto-trigger
+  generation — so no explicit removal of that script was needed.
+- **Clean reconfigure required:** the ROMFS file list is a `file(GLOB)`,
+  evaluated at configure time, so the build dir must be wiped
+  (`rm -rf build/cubepilot_cubeorangeplus_default`) for the removed file
+  to take effect — a plain incremental `make` will not re-GLOB.
+- **`bl_update` SD path verified against source** (not just argv-agnostic):
+  `bl_update.cpp` `malloc`s an erase-sector buffer, `memset`s `0xFF`,
+  reads the file, validates the vector-table header, erases sector 0,
+  and programs — so the exact 103432-byte binary installs from SD with
+  no padding. The `size != BL_FILE_SIZE_LIMIT` check at the erase step
+  is a sector-geometry assertion (128 KB sector 0), not a file-size
+  requirement.
+- `secure_bootloader.bin`: now lives at
+  `boards/cubepilot/cubeorangeplus/bootloader_artifact/cubepilot_cubeorangeplus_bootloader.bin`
+  (still the BOOT001 bootloader with the embedded manufacturer pubkey),
+  to be copied to SD for the one-shot install.
+- **Still TODO** (deferred, do not block Tier 1): a `tools/provisioning/`
+  script wrapping the factory sequence (steps 2–8); [`Docs/MANUFACTURING_RUNBOOK.md`](MANUFACTURING_RUNBOOK.md)
+  Step 4 updated to the SD `bl_update <path>` flow (done in this batch).
+- No change to the bootloader source code, RSA-PSS signing, or QGC.
 
 **Trade-off being accepted.**
 
