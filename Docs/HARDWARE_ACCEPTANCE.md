@@ -300,6 +300,68 @@ H6 blocks H11–H15 transitively (UPD001/PAR001 flows assume PAR001
 runtime enforcement). H7/H10 are unaffected — those are LOG001/POST,
 not PAR001.
 
+**BUG #5 — ROOT CAUSE FOUND + FIXED (2026-05-29, offline).** None of
+the three bench-side candidates above was correct; the real cause was a
+build-system gap, and it affected **SITL too** — meaning the recorded
+2026-05-11 "SITL §6 pass" was a false pass (PAR001 runtime enforcement
+has been compiled out since its introduction commit `fc91ce0f9e`).
+
+The enforcement lives in `src/lib/parameters/compliance_check.cpp`,
+wrapped in `#if defined(CONFIG_MODULES_SECURE_BOOT) ... #else /* no-op
+stubs */ #endif`. That file is part of the **`parameters` library**,
+which is always compiled. The board defconfig sets
+`CONFIG_MODULES_SECURE_BOOT=y`, but in PX4 a kconfig `CONFIG_*` line is
+only a **CMake variable** — it is *not* automatically a C++ preprocessor
+define for a library. `src/lib/parameters/CMakeLists.txt` used the
+variable to add the include path (`if(CONFIG_MODULES_SECURE_BOOT)
+target_include_directories(...)`) but never declared the matching
+`target_compile_definitions`. So `compliance_check.cpp` compiled the
+**`#else` no-op stub branch** on every target:
+`param_is_compliance_protected()` → `false`, `param_check_within_cap()`
+→ `true`, `param_compliance_first_unset()` → `nullptr`. Result: the
+cap-check in `parameters.cpp::param_set_internal` and the LOCKED
+lazy-zero read in `param_get` were both bypassed — exactly the bench
+symptoms (over-cap accepted, `SYS_AUTOSTART` reads 0). No warning, no
+link error, green build. Boot-time validation was unaffected because it
+reads the `.compliance_params` table on a separate code path.
+
+Fix (PX4 fork, one line in `src/lib/parameters/CMakeLists.txt`):
+```cmake
+if(CONFIG_MODULES_SECURE_BOOT)
+    target_include_directories(parameters PRIVATE ${PX4_SOURCE_DIR}/src/modules/secure_boot)
+    target_compile_definitions(parameters PRIVATE CONFIG_MODULES_SECURE_BOOT)   # BUG #5 fix
+endif()
+```
+`compliance_check.cpp` is the only file outside the `secure_boot` module
+that uses this define, so the one line fully closes the gap.
+
+**SITL re-validation after fix (2026-05-29, clean `rm -rf
+build/px4_sitl_default` reconfigure):** `compile_commands.json` confirms
+`-DCONFIG_MODULES_SECURE_BOOT` now reaches both `parameters.cpp` and
+`compliance_check.cpp`. Headless shell-mode (`PX4_SIM_MODEL=shell`) §6
+run:
+
+| Command | Result |
+|---|---|
+| `param show GF_MAX_VER_DIST` (post-boot) | `0` — CAPPED lazy-zero ✅ |
+| `param set GF_MAX_VER_DIST 200` | REJECT: `Flight-limit guard ... attempted=200.000 ceiling=120.000` ✅ |
+| `param set GF_MAX_VER_DIST 120` (at ceiling) | accept; `param show` → `120.0000` ✅ |
+| `param set SYS_AUTOSTART 4002` | `curr: 4001` → REJECT: `attempted=4002 registered=4001 (LOCKED)` ✅ |
+| `param set SYS_AUTOSTART 4001` (no-op) | accept silently, no WARN ✅ |
+| `param set MAV_SIGN_CFG 0` | `curr: 1` → REJECT: `attempted=0 registered=1 (LOCKED)` ✅ |
+| `param show SYS_AUTOSTART` / `MAV_SIGN_CFG` (once active) | `4001` / `1` ✅ |
+
+All ADR-019/020 behaviors restored. **H6 remains ❌ pending the hardware
+re-flash + bench re-run** — the fix is proven in SITL but not yet on the
+CubeOrange+. Next bench session: re-flash the rebuilt
+`cubepilot_cubeorangeplus_default`, re-run H6, and (since the SITL pass
+was previously false) treat the bench result as the authoritative gate.
+
+Lesson recorded: a PX4 `CONFIG_*` kconfig var is a CMake variable, not a
+C/C++ define — a library file guarded by `#if defined(CONFIG_*)` needs an
+explicit `target_compile_definitions` or it silently compiles the
+`#else` branch.
+
 ---
 
 This is the hardware-equivalent of [SITL_ACCEPTANCE.md](SITL_ACCEPTANCE.md).
