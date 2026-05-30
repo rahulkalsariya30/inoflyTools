@@ -130,23 +130,24 @@ committed, and pushed.
 | 2026-05-27 (bench) | Re-flash + BUG #4 surfaced — POST stack overflow during libtomcrypt RSA verify. Fixed in same session (`STACK_MAIN 20480` + `static rsa_key`), committed as `fb2a628528`. | **H3 ✅** (POST verdict visible) **H7 ✅** (audit log persists 4 CRC-clean entries on real SD). BUG #3 surfaced — `.sig` file never written. |
 | 2026-05-28 (bench) | BUG #3 root cause: `arc4random_buf` hung on uninit `g_rng.rd_sem` because `up_randompool_initialize` was never called on this board. Fix = `CONFIG_DEV_URANDOM=y` + `CONFIG_DEV_URANDOM_RANDOM_POOL=y` + `CONFIG_BOARD_INITRNGSEED=y` + `board_init_rngseed()` seeding from STM32 96-bit MCU UID. Committed `a7ed0be789`. | **H10 ✅** (offline RSA verification PASSED end-to-end — see evidence under H10 below). LOG001 chain fully proven on hardware. |
 | 2026-05-28 EOD → 2026-05-29 IST early (bench, Day 5) | Re-provisioned manifest from `a7ed0be789` ELF; H3 reconfirmed on the new build; H4 substantively closed (hashes match manifest byte-for-byte); H5 PASS (tamper → reason=2 clean end-to-end). H6 attempted and **failed**: BUG #5 found — kind-aware PAR001 runtime hooks silent on NuttX (boot validation works, runtime `param_set`/`param_get` interception doesn't fire). Audit log itself confirms BUG #5 (zero `COMPLIANCE_PARAM_VIOLATION` entries despite two violating writes). BUG #3 fix re-validated under PASS→FAIL→PASS cycle with multiple `.sig` regenerations. No code changes this session. | **H4 ✅**, **H5 ✅** (audit log decoded auditor-grade — see evidence under H5 below). **H6 ❌ FAIL — BUG #5**. |
+| 2026-05-30 (bench, Day 6) | BUG #5 fix committed (`bca0c5e212`). Re-flashed + re-provisioned; **H6 closed** (console + QGC `PARAM_SET` both reject). Found **BUG #6** (violation audit on async path) + **BUG #6b** (cached `_log_fd` EBADF — NuttX per-task-group fds); both fixed + committed (`255b8e4003`). **H7 closed for PAR001 violations** (`#9`/`#10` logged, 11/11 CRC OK, `.sig` authentic). H3/H10 reconfirmed. | **H6 ✅**, **H7 ✅** (PAR001 violations), H3/H10 ✅ reconfirmed. **H11–H15 unblocked.** |
 
-### H-step status after Day 5 (2026-05-28 EOD → 2026-05-29 IST early)
+### H-step status after Day 6 (2026-05-30 IST)
 
 | Step | Status | Closed on |
 |---|---|---|
 | **H0** board health | ✅ PASS | Day 1 (2026-05-25) |
 | **H1** flash secure_boot | ✅ PASS | Day 1 |
 | **H2** provision manifest | ✅ PASS | Day 1 |
-| **H3** POST verdict visible | ✅ PASS | Day 3 (BUG #4 fix); reconfirmed Day 5 on `a7ed0be789` |
+| **H3** POST verdict visible | ✅ PASS | Day 3 (BUG #4 fix); reconfirmed Day 5/Day 6 |
 | **H4** `firmware_integrity_status` published | ✅ PASS | Day 5 (code/data hashes match manifest byte-for-byte; 2 caveats — see H4 below) |
 | **H5** tamper test reason=2 | ✅ PASS | Day 5 (CRC mismatch detected, arming blocked, audit entry logged) |
-| **H6** PAR001 kind-aware enforcement | ❌ **FAIL** | Day 5 — blocked by **BUG #5** (runtime hooks not wired on hardware) |
-| **H7** audit log persists on real SD | ✅ PASS | Day 3; extended Day 5 across PASS/FAIL/PASS cycle |
+| **H6** PAR001 kind-aware enforcement | ✅ **PASS** | **Day 6** — BUG #5 fix flashed; console + QGC `PARAM_SET` both reject over-cap/LOCKED |
+| **H7** audit log persists on real SD | ✅ PASS | Day 3; **Day 6** extended to PAR001 violations (BUG #6/#6b fixed — `#9`/`#10` logged, 11/11 CRC OK) |
 | **H8** PAIR001 MAVLink signing | ⏸️ not started — needs SiK telemetry; PAIR001 hardware coverage gap |
 | **H9** live panel + auto-FTP | ⏸️ not run on hardware (works in SITL since 2026-05-24) |
-| **H10** offline RSA-2048 sig verification | ✅ PASS | Day 4 (1-entry); re-proven Day 5 on 3-entry multi-event log |
-| **H11–H15** | ⏸️ not started — gated by H6/BUG #5 cleared + bigger test scenarios |
+| **H10** offline RSA-2048 sig verification | ✅ PASS | Day 4 (1-entry); re-proven Day 5/Day 6 on 11-entry multi-event log |
+| **H11–H15** | ⏸️ not started — **unblocked Day 6** (H6 cleared); needs bigger update test scenarios |
 
 H10 evidence — actual session output, manufacturer private key,
 real `audit_log.bin` + `audit_log.sig` pulled from CubeOrange+ SD
@@ -361,6 +362,69 @@ Lesson recorded: a PX4 `CONFIG_*` kconfig var is a CMake variable, not a
 C/C++ define — a library file guarded by `#if defined(CONFIG_*)` needs an
 explicit `target_compile_definitions` or it silently compiles the
 `#else` branch.
+
+---
+
+### Day 6 evidence (2026-05-30 IST) — H6 closed on bench; BUG #6/#6b found + fixed; H7 PAR001-violation logging proven
+
+**H6 ✅ closed.** Re-flashed the BUG #5 fix build (`bca0c5e212` +
+uncommitted CMakeLists one-liner), re-provisioned the manifest from the
+new ELF, and re-ran on the real CubeOrange+. All ADR-019/020 behaviors
+fired through **both** entry points:
+- nsh console: `GF_MAX_VER_DIST 200` → REJECT `attempted=200.000
+  ceiling=120.000`; `120` accepted; `SYS_AUTOSTART 4002` → REJECT
+  `attempted=4002 registered=4001 (LOCKED)`; `4001` no-op accepted;
+  `MAV_SIGN_CFG 0` → REJECT `registered=1 (LOCKED)`.
+- QGC (InoflyGCS) Parameters editor (MAVLink `PARAM_SET` path, distinct
+  from the nsh `param` command): over-cap write → *"Parameter write
+  failed: GF_MAX_VER_DIST"*. Confirms the guard sits in
+  `param_set_internal` and fires regardless of caller. (Note: QGC display
+  units — a value typed in **feet** is converted to **meters** before the
+  `PARAM_SET`; the 120 **m** cap = ~393.7 ft, so `200 ft`≈61 m is accepted
+  and `1000 ft`≈305 m is rejected. Caps are enforced in SI units.)
+
+**BUG #6 + #6b — PAR001 violations weren't reaching the audit log on
+hardware (found because BUG #5's fix made enforcement real).** Two
+layered causes, both fixed (PX4 fork `255b8e4003`):
+- **#6:** `ComplianceParamGuard::onViolation()` published the audit event
+  only via `orb_advertise()` — the async uORB path BUG #1 already found
+  unreliable on NuttX. POST/UPDATE were moved to the synchronous
+  `logEventSync()` path then; violations were left on the async rail.
+  Fix: route `onViolation()` through `logEventSync()` (guard now holds a
+  `SecurityAuditLogger*`), `orb_advertise()` fallback only.
+- **#6b:** the sync write then failed with `ERROR write failed: Bad file
+  number` (EBADF). `SecurityAuditLogger` cached `_log_fd` from
+  `_openLogFile()`, which runs in the `secure_boot` command task. **NuttX
+  file descriptors are per-task-group**, so the cached fd is invalid when
+  `_writeEntry()` runs on the `param_set` caller thread (nsh /
+  `mavlink_receiver`). Fix: drop the cached fd; `_writeEntry()` opens its
+  own `O_APPEND` fd per write — the pattern `_recoverSequenceNum()` /
+  `_updateLogSignature()` already used. This also explains the original
+  BUG #1 async silence (the WQ `Run()` likewise executes off the
+  fd-owning task). No change to enforcement, POST, update verification, or
+  the log/signature format — only audit-event delivery + fd lifecycle.
+
+**H7 ✅ closed (now incl. PAR001 violations).** Post-fix bench run, decoded
++ verified offline:
+- `secure_boot start` → POST `#8` logged (type=1 result=0); **no
+  `write failed`**.
+- `GF_MAX_VER_DIST 200` → `#9` logged; `SYS_AUTOSTART 4002` → `#10`
+  logged — both `EVENT_PARAM_CHANGE / FAILURE`, decoded as *"Attempted to
+  change &lt;NAME&gt; - rejected (protected flight parameter) [PAR001 /
+  Gazette 7.1(c)]"*.
+- `secure_boot param_status` → `Violations rejected : 2`; pre-arm
+  correctly `BLOCKED (first unset: GF_MAX_VER_DIST)`.
+- Bonus: entry `#7` shows the **pre-arm arming gate** is itself audited
+  (*"Arming was blocked by a security check / compliance unset:
+  GF_MAX_VER_DI"*, `POST001 arming gate`).
+- `decode_audit_log.py`: **11/11 entries CRC OK, 0 failures**; PAR001
+  coverage = 2 events (was 0). `verify_audit_log.py`: **signature
+  authentic** (decrypted SHA-256 matches `audit_log.bin` byte-for-byte).
+
+**H3 ✅ / H10 ✅ reconfirmed** on the Day 6 build (POST code/data check
+green against the re-provisioned manifest; 256-byte `.sig` verifies).
+
+With H6 cleared, **H11–H15 are unblocked** for the next bench session.
 
 ---
 
@@ -790,8 +854,8 @@ provisioning per the Manufacturing Runbook.
 | H3 POST pass (real hash) | ✅ | 2026-05-27 / 2026-05-28 Day 5 | **milestone** — reconfirmed on `a7ed0be789` |
 | H4 uORB real values | ✅ | 2026-05-28 Day 5 | hashes match manifest byte-for-byte; `board_id` uint8 truncation + missing `boot_count`/`manifest_version` flagged |
 | H5 tamper → reason=2 | ✅ | 2026-05-28 Day 5 | CRC stored vs computed mismatch logged, arm blocked, audit entry written |
-| H6 PAR001 enforcement | ❌ | 2026-05-28 Day 5 | **BUG #5** — runtime `param_set`/`param_get` hooks silent on hw (boot validation works) |
-| H7 PAR001 audit (SD persist) | ✅ | 2026-05-27 | extended Day 5 — `.sig` rewrites cleanly across PASS/FAIL/PASS |
+| H6 PAR001 enforcement | ✅ | 2026-05-30 Day 6 | BUG #5 fix flashed; over-cap + LOCKED rejected via nsh **and** QGC `PARAM_SET`; pre-arm gate blocks until CAPPED set |
+| H7 PAR001 audit (SD persist) | ✅ | 2026-05-27 / 2026-05-30 Day 6 | Day 6: PAR001 violations now persist (BUG #6/#6b fixed) — `#9`/`#10`, 11/11 CRC OK, `.sig` authentic |
 | H8 PAIR001 signing | ⬜ | | needs SiK telemetry |
 | H9 live panel + backfill | ⬜ | | works in SITL since 2026-05-24 |
 | H10 offline sig verify | ✅ | 2026-05-28 / Day 5 | re-proven on 3-entry multi-event log |
