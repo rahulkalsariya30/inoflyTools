@@ -259,6 +259,44 @@ def verify_binary_manifest(binary_manifest: bytes, public_key_path: Path) -> boo
         return False
 
 
+def decode_binary_manifest(binary_manifest: bytes) -> dict:
+    """
+    Decode a 373-byte binary manifest back into a signed-bundle-shaped dict.
+
+    The returned dict has the same shape export_binary_manifest() expects, so
+    the caller can mutate one field (a hash or board_id) and feed it straight
+    back into export_binary_manifest() to produce a *re-signed* variant. This
+    is what the H14/H15 fixture helpers do
+    (make_hash_mismatch_manifest.py, make_wrong_boardid_manifest.py).
+
+    The input signature is intentionally NOT carried over — export re-signs the
+    (possibly mutated) payload. created_at round-trips through the UTC unix
+    timestamp so an unmutated decode→export reproduces the same created_at
+    (the signature/CRC differ only because RSA-PSS uses a random salt).
+    """
+    if len(binary_manifest) != TOTAL_SIZE:
+        raise ValueError(f"manifest must be {TOTAL_SIZE} bytes, got {len(binary_manifest)}")
+
+    (magic, _fmt_ver, code_hash, data_hash, _sig, _sig_len,
+     board_id, version_padded, created_at, _crc) = struct.unpack(STRUCT_FORMAT, binary_manifest)
+
+    if magic != MAGIC:
+        raise ValueError(f"bad magic {magic!r}; not an INOFLY03 manifest")
+
+    version_str  = version_padded.rstrip(b"\x00").decode("utf-8", errors="replace")
+    generated_at = datetime.fromtimestamp(created_at, tz=timezone.utc).isoformat()
+
+    return {
+        "manifest": {
+            "code_checksum":    binascii.hexlify(code_hash).decode("ascii"),
+            "data_checksum":    binascii.hexlify(data_hash).decode("ascii"),
+            "board_id":         int(board_id),
+            "firmware_version": version_str,
+            "generated_at":     generated_at,
+        }
+    }
+
+
 def save_binary_manifest(binary_manifest: bytes, output_path: Path) -> None:
     """Write binary manifest to file."""
     output_path = Path(output_path)

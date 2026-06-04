@@ -147,7 +147,11 @@ committed, and pushed.
 | **H8** PAIR001 MAVLink signing | ⏸️ not started — needs SiK telemetry; PAIR001 hardware coverage gap |
 | **H9** live panel + auto-FTP | ⏸️ not run on hardware (works in SITL since 2026-05-24) |
 | **H10** offline RSA-2048 sig verification | ✅ PASS | Day 4 (1-entry); re-proven Day 5/Day 6 on 11-entry multi-event log |
-| **H11–H15** | ⏸️ not started — **unblocked Day 6** (H6 cleared); needs bigger update test scenarios |
+| **H11** UPD001 accept | ✅ PASS | **Day 7** — FC `verify_update` accepts manufacturer-signed staged manifest (QGC bundle-verify green; FTP transport = BUG #7) |
+| **H12** UPD001 reject (A QGC + B FC) | ✅ PASS | **Day 7** — QGC red FAILED; FC CRC tamper → reason=2 |
+| **H13** attacker-key reason=3 | ✅ PASS | **Day 7** — POST (ret=7) + verify_update (ret=22) + QGC all reject; libtomcrypt sig branch proven live |
+| **H14** organic reason 4/5 (Tier 1 prize) | ✅ PASS | **Day 7** — reason=4 (code, 1.87 MB hashed) + reason=5 (data, 96 B; code→data ordering confirmed); restore → PASS |
+| **H15** board_id reason=4 | ✅ PASS | **Day 7** — FC gap found+fixed (board_id check added to gatekeeper, PX4 `9bc8395660`); 1064 → reject, 1063 → accept |
 
 H10 evidence — actual session output, manufacturer private key,
 real `audit_log.bin` + `audit_log.sig` pulled from CubeOrange+ SD
@@ -425,6 +429,68 @@ layered causes, both fixed (PX4 fork `255b8e4003`):
 green against the re-provisioned manifest; 256-byte `.sig` verifies).
 
 With H6 cleared, **H11–H15 are unblocked** for the next bench session.
+
+---
+
+### Day 7 evidence (2026-06-04 IST) — H11–H15 closed; Tier 1 H0–H15 functionally complete (H8/H9 carried)
+
+Ran the remaining update/POST gate on the CubeOrange+ after rebuilding the
+`255b8e4003` fork (BUG #5/#6/#6b) and re-provisioning. Two findings on the
+way (one FC gap fixed for H15, one QGC transport bug deferred). Fixtures for
+H14/H15 were built offline by the two new helpers
+(`tools/make_hash_mismatch_manifest.py`, `tools/make_wrong_boardid_manifest.py`,
+covered by `tests/compliance/test_H14H15_fixture_helpers.py`); all FC-side
+staging was done by hand via the SD card + nsh `cp` because of BUG #7.
+
+| Step | Result | Evidence |
+|---|---|---|
+| **H11** accept | ✅ | `verify_update` → `accepted - manufacturer signature verified`, `authorized update to v0.1 (board_id=1063)`, `UPDATE_ATTEMPT` SUCCESS (`#13`). QGC bundle-verify **green VERIFIED**. |
+| **H12.A** QGC reject | ✅ | `test_firmware_tampered.fwbundle` → red `FAILED — Signature invalid`, Install hidden. |
+| **H12.B** FC reject | ✅ | tampered staged manifest → `CRC mismatch (stored=0x919173B6 computed=0xBB4D308B)` → REJECTED reason=2, `UPDATE_ATTEMPT` FAILURE (`#16`). |
+| **H13** attacker key | ✅ | POST `Signature check failed (ret=7)` reason=3 (`#21`); `verify_update` `(ret=22)` reason=3 (`#23`); QGC red. libtomcrypt RSA-PSS reject branch proven live on all three paths. |
+| **H14.A** code (reason=4) | ✅ | `Firmware code check FAILED - code changed since signing (1870700 bytes)`, `failure_reason: 4`, arm blocked (`#24`). Real 1.87 MB flash hash. |
+| **H14.B** data (reason=5) | ✅ | `Flight-parameter check FAILED - parameters changed since signing (96 bytes)`, `failure_reason: 5`. Listener showed **correct** `code_hash` + **wrong** `data_hash` → confirms code→data ordering on hardware. Restore → POST PASS (`#28`). |
+| **H15** board_id (reason=4) | ✅ | board_id 1064 manifest → `board_id 1064 does not match this hardware (1063)`, REJECTED reason=4 (`#31`); board_id 1063 → ACCEPTED (`#32`). |
+
+**H15 — FC gap found and fixed.** `FirmwareUpdateGatekeeper::verifyAndAuthorize`
+verified CRC + magic + signature but **never compared board_id** — a
+validly-signed update targeting a different board was being *accepted*
+(`REASON_BOARD_ID_MISMATCH=4` existed in the msg, but no check used it). This
+was never caught before because H15 has no SITL counterpart. Fix (PX4 fork
+`9bc8395660`): added a Step-5 board_id check after the signature check,
+guarded `#if defined(SECURE_BOOT_BOARD_ID)` exactly like POST004
+`_verify_board_id`, so SITL is unaffected. The Tier 1 build was rebuilt with
+this fix; H11–H14 had already passed on the immediately prior build (only
+delta is the new check), and the H15 positive control re-confirms accept on a
+correct board.
+
+**BUG #7 (QGC-side, transport-only, DEFERRED).** QGC's "Install on Drone"
+FTP-upload of `update_manifest.bin` fails with `File Not Found`
+(`kCmdCreateFile` → `open(O_CREAT)` → `ENOENT`) even though the FC itself
+writes `audit_log.bin` into the same `/fs/microsd/inofly/` every boot and
+`cp` creates files there fine. So the FTP module's runtime root path isn't
+resolving `inofly/…` to the same `/fs/microsd/inofly/` the secure_boot module
+uses directly. FTP read from `inofly/` has never actually been exercised on
+hardware either (audit logs were SD-pulled, H9 never run on hw). The decisive
+data point — whether a QGC FTP **download** of `inofly/audit_log.bin` also
+fails on hardware — is the first step of the BUG #7 fix. This is QGC/transport
+plumbing, **not** the security stack: the FC accept/reject property (H11/H12.B)
+was proven directly via nsh, and QGC's client-side bundle verification (H12.A,
+H13.B) works. Does not block Tier 1.
+
+**Observation — `data_hash` is sensitive to code layout.** A pure code-side
+change (the H15 gatekeeper edit) shifted `data_hash` from `99f5fd28…` to
+`f05e43d2…` even though no compliance-param *values* changed. Likely the
+`.compliance_params` table embeds param-name string pointers whose addresses
+moved. Not a security issue (POST regenerates the manifest per build, and the
+hash check is self-consistent), but it means `data_hash` is not reproducible
+across unrelated code changes — worth a note for the reproducible-build /
+auto-update story. Tracked as a follow-up, does not block Tier 1.
+
+**Carried gaps:** H8 (PAIR001 over SiK telemetry) and H9 (live audit panel +
+auto-FTP backfill on hardware) remain — H8 needs telemetry-radio bench
+coverage and H9 is gated on BUG #7. Both are independent of the POST/UPD001
+chain proven here.
 
 ---
 
@@ -817,22 +883,47 @@ software-refused afterward).
 
 ---
 
-## Tooling to add before running H14/H15
+## Tooling for H14/H15 — built 2026-05-30 (offline prep)
 
-These don't exist yet; they're small and fixture-only (gitignored output):
+Both helpers now exist (`tools/`, fixture output is gitignored). Each
+decodes a real signed manifest, mutates exactly one field, and **re-signs
+with the manufacturer key** via `export_binary_manifest` — so the output
+keeps a valid CRC (reason=2 passes) and a valid RSA-PSS signature
+(reason=3 passes) and the failure lands on the field under test. Each has
+built-in cross-hash / cross-id sanity guards (input must verify under the
+manufacturer key first; the mutated field must actually differ from the
+live target) so a buggy fixture cannot false-pass on the bench. Covered by
+`tests/compliance/test_H14H15_fixture_helpers.py` (12 tests).
 
-- **`tools/make_hash_mismatch_manifest.py`** — take a real signed
-  manifest, swap `code_hash` *or* `data_hash` to a wrong value, re-sign
-  with the manufacturer key, re-CRC. Needed to isolate H14.B (reason=5)
-  cleanly. H14.A can use a prior-build ELF instead, but this helper makes
-  both sub-tests deterministic.
-- **`tools/make_wrong_boardid_manifest.py`** (or a `--board-id` override
-  on the existing pipeline) — produce a validly-signed update manifest
-  with a non-matching `board_id` for H15.
+- **`tools/make_hash_mismatch_manifest.py`** — H14. Swaps `code_hash`
+  (`--mutate code` → reason=4) or `data_hash` (`--mutate data` → reason=5,
+  keeping `code_hash` correct so the code→data ordering is exercised). The
+  wrong hash is the real hash with its first byte flipped, guaranteeing it
+  can't match the running flash.
+  ```
+  py -3 tools/make_hash_mismatch_manifest.py \
+      release/cubepilot_cubeorangeplus_default_manifest.bin \
+      --mutate code --output .fixture_workdir/wrong_code_manifest.bin
+  py -3 tools/make_hash_mismatch_manifest.py \
+      release/cubepilot_cubeorangeplus_default_manifest.bin \
+      --mutate data --output .fixture_workdir/wrong_data_manifest.bin
+  ```
+- **`tools/make_wrong_boardid_manifest.py`** — H15. Rewrites `board_id` to
+  a different valid value (`--board-id`, default 1064) and re-signs; refuses
+  a value equal to the device id 1063. Stage the output as
+  `update_manifest.bin` and run `secure_boot verify_update` → reason=4
+  (board_id mismatch — a *separate* enum from the POST reason=4 hash code).
+  ```
+  py -3 tools/make_wrong_boardid_manifest.py \
+      release/cubepilot_cubeorangeplus_default_manifest.bin \
+      --output .fixture_workdir/wrong_boardid_update_manifest.bin
+  ```
 
-Add a cross-key/cross-hash sanity guard at generation time (as
-`regenerate_attacker_fixtures.py` does) so a buggy fixture can't
-false-pass by accidentally matching the running flash.
+> **Bench note.** Generate these from the **same** `manifest.bin` that is
+> actually provisioned on the unit under test (the H2 output). The helpers
+> verify the input against the manufacturer key before mutating, so a stale
+> or wrong-build input is rejected loudly rather than producing a fixture
+> that fails for the wrong reason.
 
 ---
 
@@ -859,8 +950,8 @@ provisioning per the Manufacturing Runbook.
 | H8 PAIR001 signing | ⬜ | | needs SiK telemetry |
 | H9 live panel + backfill | ⬜ | | works in SITL since 2026-05-24 |
 | H10 offline sig verify | ✅ | 2026-05-28 / Day 5 | re-proven on 3-entry multi-event log |
-| H11 UPD001 accept | ⬜ | | |
-| H12 UPD001 reject (A+B) | ⬜ | | |
-| H13 attacker-key reason=3 | ⬜ | | |
-| H14 organic reason 4/5 | ⬜ | | **Tier 1 prize** |
-| H15 board_id reason=4 | ⬜ | | |
+| H11 UPD001 accept | ✅ | 2026-06-04 Day 7 | FC accept proven via nsh; QGC bundle-verify green; FTP transport deferred (BUG #7) |
+| H12 UPD001 reject (A+B) | ✅ | 2026-06-04 Day 7 | QGC red FAILED; FC CRC tamper → reason=2 |
+| H13 attacker-key reason=3 | ✅ | 2026-06-04 Day 7 | POST + verify_update + QGC all reject; libtomcrypt sig branch live |
+| H14 organic reason 4/5 | ✅ | 2026-06-04 Day 7 | **Tier 1 prize** — reason=4 (1.87 MB) + reason=5 (96 B, code→data ordering); restore → PASS |
+| H15 board_id reason=4 | ✅ | 2026-06-04 Day 7 | FC gap fixed (PX4 `9bc8395660`); 1064 reject, 1063 accept |
