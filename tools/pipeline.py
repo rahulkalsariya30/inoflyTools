@@ -26,6 +26,7 @@ USAGE (Hardware — CubeOrange+):
 """
 
 import json
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,7 @@ class PipelineResult:
     manifest: dict
     signed_bundle: dict
     fwbundle_path: Path
+    firmware_path: Path
     binary_manifest_path: Path
     all_verified: bool
 
@@ -182,9 +184,23 @@ def run_pipeline(
         raise RuntimeError("BINARY MANIFEST VERIFICATION FAILED — aborting pipeline")
     log(f"      Binary manifest valid")
 
+    # Copy the firmware .px4 into the output dir alongside its manifest/bundle.
+    # create_bundle() embeds the .px4 inside the .fwbundle but leaves no loose
+    # copy, so the .px4 in output_dir would otherwise go stale across rebuilds —
+    # you flash an old image while the freshly-generated manifest expects the new
+    # one (a code_hash mismatch that fails POST, or worse, silently flashing the
+    # wrong firmware). Skip the copy if the source already IS the output path.
+    firmware_path = output_dir / f"{stem}.px4"
+    if px4_path.resolve() != firmware_path.resolve():
+        shutil.copy2(px4_path, firmware_path)
+        log(f"      Firmware copied:  {firmware_path}")
+    else:
+        firmware_path = px4_path
+
     log(f"\n{'='*60}")
     log(f"PIPELINE COMPLETE — all 3 verification gates passed")
     log(f"{'='*60}")
+    log(f"  Firmware:        {firmware_path}")
     log(f"  Bundle:          {fwbundle_path}")
     log(f"  Binary manifest: {binary_manifest_path}")
     log(f"  Signed JSON:     {signed_path}")
@@ -195,6 +211,7 @@ def run_pipeline(
         manifest=manifest,
         signed_bundle=signed_bundle,
         fwbundle_path=fwbundle_path,
+        firmware_path=firmware_path,
         binary_manifest_path=binary_manifest_path,
         all_verified=True,
     )
