@@ -2625,6 +2625,112 @@ ADR-015 to "superseded by ADR-022."
 
 ---
 
+### ADR-023 — Auto-flash-after-verify via app-fw-orchestrated self-reflash (2026-06-05, PROPOSED — design draft, not executed)
+
+**Status:** 📝 **PROPOSED — design draft 2026-06-05. No code. No firmware
+change yet.** Records the decision *direction* and, more importantly, the
+*binding safety requirement* so that whoever implements it cannot skip it.
+Mechanism selection is left open pending two prerequisites (see "Open
+questions"). Do not treat any sub-mechanism below as chosen.
+
+**Context — what exists today.** The signed-update story is verified but
+not *applied* on-device. `secure_boot verify_update`
+([`secure_boot_main.cpp`](../../PX4-Autopilot/src/modules/secure_boot/secure_boot_main.cpp)
+≈ line 156) reads the staged `update_manifest.bin`, runs
+`FirmwareUpdateGatekeeper::verifyAndAuthorize` (CRC32 + RSA-PSS over the
+manifest + board_id match — UPD001), logs an `UPDATE_ATTEMPT` audit event,
+optionally logs a `PARAM_CHANGE` if `data_hash` moved, and returns. **It
+never writes flash.** The actual new app-fw image is delivered separately by
+QGC's standard PX4 wire-protocol upload through the bootloader. So H11's
+"Install on Drone → ACCEPTED" means *the manifest was authorized*, not *the
+image was installed*. There is no on-device path that, given a verified
+manifest, installs the corresponding firmware image. This ADR is about
+closing that gap so a signed update applies end-to-end.
+
+**Decision (direction, chosen 2026-06-05).** **App-fw-orchestrated
+self-reflash.** After `verify_update` accepts, the running app fw itself
+drives installation of the new app-fw image. Chosen over
+*secure-bootloader-applies-on-next-boot* because the latter **hard-depends on
+the Phase 5b secure bootloader** (BOOT001/006), which is sequenced last; the
+app-fw-orchestrated path can be developed and tested under the current
+factory bootloader. Trade-off accepted and recorded below: the applier is
+part of the TCB being replaced (residual risk), and under the *factory*
+bootloader there is no boot-time signature net to catch a bad write.
+
+**Binding safety requirement (non-negotiable, the reason this ADR exists).**
+A verified *manifest* is not a verified *image*. Auto-flash MUST stage the
+new app-fw **image** alongside the manifest and, before erasing a single byte
+of the active firmware, verify the **bytes about to be written**:
+`SHA-256(staged image code region) == manifest.code_hash` (and the data
+region against `data_hash`), with the manifest itself already RSA-PSS-verified
+under the manufacturer key. Skipping this — flashing on the strength of a
+signed manifest whose image was never hash-bound — would let a swapped image
+through and is exactly the failure ADR-018's code/data split exists to
+prevent. The current `.fwbundle` / staging format carries only the manifest;
+it must be extended to carry (or FTP-stage) the image, and `verify_update`
+(or a new `apply_update`) must add the image↔manifest hash binding.
+
+**Mechanism — OPEN, must be verified against PX4 source before execution.**
+The app fw executes *from* the internal flash it would need to erase, so this
+is not a naive `write()`. Candidates, none selected here:
+
+| Candidate | Sketch | Risk / unknown |
+|---|---|---|
+| **A — reboot-to-bootloader** | FC stages + hash-binds the image, then reboots; the bootloader performs the write (standard px_uploader-style flow). | Under the *factory* bootloader the write is unsigned-accepting; the signature net only exists once the Phase 5b secure bootloader (BOOT001) is installed. Ties this ADR to bootloader sequencing. |
+| **B — dual-bank flash** | Write the inactive flash bank while running from the active bank, then bank-swap on reset. | Requires confirming the CubeOrange+ MCU exposes dual-bank flash **and** that PX4 supports a bank-swap path. Unverified — do not assume. |
+| **C — RAM-resident flasher** | Copy a small erase+program routine to RAM, jump to it, rewrite the app region, reset. | Highest risk; a power loss mid-erase with no recovery net = brick. |
+
+This ADR does **not** pick A/B/C. It fixes only the *direction* (app-fw
+orchestrates) and the *binding requirement* (verify bytes before write).
+
+**Interaction with Phase 5b (the safety net).** Once the secure bootloader
+(BOOT001) is installed, whatever image self-reflash writes is RSA-PSS-verified
+on the **next boot** regardless — a corrupt or mis-applied image fails the
+boot check and the unit refuses to run unsigned code (fail-safe, not
+fail-open). That boot-time net is what makes app-fw self-reflash acceptable.
+Under the *current factory* bootloader there is **no** such net: an
+interrupted or bad auto-flash can leave a non-booting unit recoverable only
+via QGC manual re-flash over USB. **Recommendation:** sequence execution of
+this ADR *after* Phase 5b, so BOOT001 backstops every self-reflash. (This is
+consistent with the project sequencing as of 2026-06-05: auto-flash design
+now, bootloader bring-up, then auto-flash execution.)
+
+**Residual risk — TCB.** The applier lives in the app fw being replaced; a
+compromised running app fw could mis-apply an update. Two things bound this:
+(1) the verify-bytes-before-write requirement above, and (2) BOOT001
+verifying on next boot. Net authority is not actually increased — a malicious
+running fw already controls the device and could refuse/forge updates
+regardless of whether an auto-flash path exists. Recorded for the auditor,
+not a blocker.
+
+**What does NOT change.** ADR-016 RSA-2048 signing infrastructure; ADR-018
+code/data hash split and manifest format semantics; UPD001 manifest
+verification (CRC + RSA-PSS + board_id); `UPDATE_ATTEMPT` audit logging. This
+ADR *adds* an apply step after verification; it removes no existing check.
+
+**Open questions / TODO before this can move from PROPOSED → EXECUTED.**
+1. Confirm the CubeOrange+ flash self-write capability against PX4 source
+   (dual-bank? bootloader-mediated only?) — decides mechanism A/B/C.
+2. Extend the staged-update format to carry the firmware **image**, not just
+   the manifest, and define its SD staging path.
+3. Add the image↔manifest hash binding to the verify path (the binding safety
+   requirement) — with a unit test named for the requirement.
+4. Define failure/rollback behavior and new audit events (e.g.
+   `UPDATE_APPLIED` success/failure) so a half-applied update is observable.
+5. Settle sequencing vs Phase 5b — recommended *after* BOOT001 exists.
+
+**Alternatives considered.**
+- *Secure-bootloader-applies-on-next-boot.* Cleaner trust story (the
+  root-of-trust does the apply, app fw only stages). Rejected **for now**
+  because it hard-depends on Phase 5b; revisit if Phase 5b lands first — at
+  which point B-via-bootloader and this alternative converge.
+- *Leave update application as a manual QGC re-flash (status quo).* Valid and
+  DGCA-compliant (Gazette mandates *signed* updates, not *automatic* ones).
+  This ADR is a usability/operability improvement, not a compliance gap
+  closure — which is why it is PROPOSED, not urgent.
+
+---
+
 ## 13. Residual risks (acknowledged)
 
 The architecture defends against software-level attacks and
