@@ -54,13 +54,21 @@ exact pass criterion.
 - **Pass:** prints `linked .../rootfs/fs/microsd/inofly -> ../../inofly`
   and `ls` shows the link resolving to the populated `rootfs/inofly/`.
 
-## 3. POST passes on boot
+## 3. POST passes on boot (autostart)
 
 - **Covers:** POST001, ROT002
-- **Action:** start SITL, then at the `pxh>` prompt: `secure_boot start`
-- **Pass:** module reports `POST: PASS` and publishes
-  `firmware_integrity_status` uORB with `check_passed=true`. No
-  `ARMING_BLOCKED` reasons posted.
+- **Action:** just start SITL — `secure_boot start` now runs automatically
+  from `init.d-posix/rcS` (hardware does the same via the CubeOrange+
+  `rc.board_extras`), so POST runs at boot with no manual command. Watch
+  the boot log for the `secure_boot` POST lines.
+- **Pass:** boot log shows `Pre-operational self-test passed` and `Audit
+  log ready (... async=on)` without typing anything; `firmware_integrity_status`
+  uORB publishes with `check_passed=true`; no `ARMING_BLOCKED` reasons posted.
+- **Note:** because the logger now autostarts, the INOFLY_AL / INOFLY_FW
+  `DEBUG_FLOAT_ARRAY` streams are live from boot — this is what the GCS
+  real-time Live Events panel and the Install-on-Drone result depend on. A
+  dormant logger (no autostart) is exactly what made Install-on-Drone time
+  out on hardware before this was wired (2026-06-05).
 
 ## 4. `firmware_integrity_status` uORB published
 
