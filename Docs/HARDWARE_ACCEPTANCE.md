@@ -145,9 +145,9 @@ committed, and pushed.
 | **H6** PAR001 kind-aware enforcement | ✅ **PASS** | **Day 6** — BUG #5 fix flashed; console + QGC `PARAM_SET` both reject over-cap/LOCKED |
 | **H7** audit log persists on real SD | ✅ PASS | Day 3; **Day 6** extended to PAR001 violations (BUG #6/#6b fixed — `#9`/`#10` logged, 11/11 CRC OK) |
 | **H8** PAIR001 MAVLink signing | ⏸️ not started — needs SiK telemetry; PAIR001 hardware coverage gap |
-| **H9** live panel + auto-FTP | ⏸️ not run on hardware (works in SITL since 2026-05-24) |
+| **H9** live panel + auto-FTP | ✅ **PASS** | **Day 8** — BUG #7 fixed (absolute FTP paths); audit download 33 entries + `.sig`; live panel streams from boot (autostart) |
 | **H10** offline RSA-2048 sig verification | ✅ PASS | Day 4 (1-entry); re-proven Day 5/Day 6 on 11-entry multi-event log |
-| **H11** UPD001 accept | ✅ PASS | **Day 7** — FC `verify_update` accepts manufacturer-signed staged manifest (QGC bundle-verify green; FTP transport = BUG #7) |
+| **H11** UPD001 accept | ✅ PASS | **Day 7** — FC `verify_update` accepts manufacturer-signed staged manifest (QGC bundle-verify green); **Day 8** — FTP transport fixed (BUG #7), Install-on-Drone → ACCEPTED on hardware |
 | **H12** UPD001 reject (A QGC + B FC) | ✅ PASS | **Day 7** — QGC red FAILED; FC CRC tamper → reason=2 |
 | **H13** attacker-key reason=3 | ✅ PASS | **Day 7** — POST (ret=7) + verify_update (ret=22) + QGC all reject; libtomcrypt sig branch proven live |
 | **H14** organic reason 4/5 (Tier 1 prize) | ✅ PASS | **Day 7** — reason=4 (code, 1.87 MB hashed) + reason=5 (data, 96 B; code→data ordering confirmed); restore → PASS |
@@ -464,7 +464,7 @@ this fix; H11–H14 had already passed on the immediately prior build (only
 delta is the new check), and the H15 positive control re-confirms accept on a
 correct board.
 
-**BUG #7 (QGC-side, transport-only, DEFERRED).** QGC's "Install on Drone"
+**BUG #7 (QGC-side, transport-only, ✅ RESOLVED 2026-06-05 Day 8 — see Day 8 evidence below).** QGC's "Install on Drone"
 FTP-upload of `update_manifest.bin` fails with `File Not Found`
 (`kCmdCreateFile` → `open(O_CREAT)` → `ENOENT`) even though the FC itself
 writes `audit_log.bin` into the same `/fs/microsd/inofly/` every boot and
@@ -487,10 +487,84 @@ hash check is self-consistent), but it means `data_hash` is not reproducible
 across unrelated code changes — worth a note for the reproducible-build /
 auto-update story. Tracked as a follow-up, does not block Tier 1.
 
-**Carried gaps:** H8 (PAIR001 over SiK telemetry) and H9 (live audit panel +
-auto-FTP backfill on hardware) remain — H8 needs telemetry-radio bench
-coverage and H9 is gated on BUG #7. Both are independent of the POST/UPD001
-chain proven here.
+**Carried gaps (as of Day 7):** H8 (PAIR001 over SiK telemetry) and H9 (live
+audit panel + auto-FTP backfill on hardware) remain — H8 needs telemetry-radio
+bench coverage and H9 is gated on BUG #7. **H9 was closed on Day 8 once BUG #7
+was fixed (see below); only H8 now remains.**
+
+### Day 8 evidence (2026-06-05 IST) — BUG #7 fixed, POST/logger autostart wired, H9 closed
+
+Closed the QGC FTP transport gap (BUG #7) and, with it, the real-time
+live-panel and Install-on-Drone flow on the CubeOrange+, then wired POST + the
+audit logger to autostart at boot.
+
+**BUG #7 root cause — relative-vs-absolute FTP path (the Day 7 analysis had it
+backwards).** PX4 `mavlink_ftp` prepends `_root_dir = PX4_ROOTFSDIR` to every
+requested path. On **NuttX hardware `PX4_ROOTFSDIR = ""`** (empty); in **SITL
+it is `"."`**. Our QGC custom controllers sent **relative** URIs
+(`inofly/audit_log.bin`, `inofly/audit_log.sig`, `inofly/update_manifest.bin`)
+which on hardware resolved cwd-relative (`/inofly/…`) → `FileNotFound`, even
+though the FC writes/reads `/fs/microsd/inofly/`. The upload also failed
+`_validatePathIsWritable` (NuttX-only; requires a `/fs/microsd/` prefix). SITL
+hid it because `_root_dir="."` made the relative paths resolve. **Fix:**
+absolute `/fs/microsd/inofly/…` in QGC (`AuditLogController`,
+`SecureFirmwareController`), inoflyGCU `6351f519d`; SITL keeps working via
+`tools/sitl_ftp_symlink.sh` (`rootfs/fs/microsd/inofly -> ../../inofly`,
+SITL_ACCEPTANCE step 2a). **Verified on hardware:** audit-log **download** =
+`Parsed 33 entries (33 valid) — signature downloaded`; **upload** reaches the
+FC gatekeeper.
+
+**Install-on-Drone timeout / empty live panel — root cause was a dormant audit
+logger, not FTP.** After the FTP fix, download worked but Install-on-Drone
+timed out and the live panel stayed empty (file-backfill only). Cause:
+**`secure_boot start` had not run this boot**, so `g_audit_logger` was null →
+`verify_update`'s audit event took the dead-end uORB-advertise fallback that
+nothing consumes → no file write and no `_streamEvent` → no `INOFLY_AL`
+`DEBUG_FLOAT_ARRAY`, which is exactly the live stream QGC's install listener
+waits on → timeout. Diagnosed via `listener debug_array` = **"never published"**
+plus the missing `Audit event recorded` log line (the `DEBUG_FLOAT_ARRAY` stream
+itself is correctly configured — USB instance = mode Onboard @10 Hz). After a
+manual `secure_boot start`, `verify_update` logged `#N` AND `listener
+debug_array` showed `name:"INOFLY_AL"` → QGC Install-on-Drone → **ACCEPTED**,
+live panel streamed.
+
+**Fix — POST + logger autostart at boot (resolves the deferred autostart
+item).** Wired `secure_boot start` into boot so POST runs and the logger comes
+up every boot with no manual nsh command. Without it a fresh boot ran **no POST
+and no arming gate** (a POST001 gap on a deployed unit) plus the dead-end audit
+path above.
+- `boards/cubepilot/cubeorangeplus/init/rc.board_extras` (new) — `secure_boot
+  start`, sourced late by rcS after params + airframe setup.
+- `ROMFS/px4fmu_common/init.d-posix/rcS` — same line for SITL parity.
+- PX4 fork `354696551e`. Changes `code_hash` (new `21cf1d8b`; `data_hash`
+  `f05e43d2` unchanged) → clean rebuild (the new ROMFS file needs a CMake
+  reconfigure) + reprovision.
+- **Verified on CubeOrange+** (flashed `g9bc8395660-dirty`, Jun 5 build):
+  `firmware_integrity_status check_passed=True` with **no manual start**, Live
+  Events stream from boot, Install-on-Drone → **ACCEPTED**. SITL (SIH boot)
+  confirms the same.
+
+| Step | Result | Evidence |
+|---|---|---|
+| **H9** live panel + auto-FTP backfill | ✅ | Audit download = 33 entries (33 valid) + `.sig`; live panel streams from boot (autostart). First real FTP read over the USB link on hardware. |
+| **H11** FTP transport (was BUG #7) | ✅ | QGC FTP upload of `update_manifest.bin` lands at `/fs/microsd/inofly/`; Install-on-Drone → **ACCEPTED** (board-1063 bundle). |
+
+**Boot-timestamp note (GPS solution chosen).** Autostart POST runs ~1 s after
+power-on, before any time source, so the boot POST/arming entries are
+uptime-stamped (`wall clock not synced`): the Cube's RTC reads its 2000 default
+(drained supercap) and QGC `SYSTEM_TIME` / GPS set the clock only post-boot.
+Decision — rely on GPS (deployed units) for real dates and keep the honest "not
+synced" flag for pre-sync boot events rather than persist a possibly-stale time
+(`time_persistor` rejected for the audit log; deferring POST until sync rejected
+because it would leave arming ungated on a no-GPS/no-GCS unit). The ulog remains
+the authoritative time source at audit.
+
+**Tooling:** `pipeline.py` now copies the input `.px4` into the output dir
+(inoflyTools `083ff81`) so the loose `release/*.px4` can't go stale across
+rebuilds.
+
+**Only carried gap:** **H8** (PAIR001 over SiK telemetry) — needs a
+telemetry-radio bench. Tier 1 H0–H7 and H9–H15 are now closed on real silicon.
 
 ---
 
@@ -649,7 +723,15 @@ Where SITL says `pxh>`, hardware uses the `nsh>` / MAVLink Console prompt.
 ## H3. POST passes on real silicon — **milestone**
 
 - **Covers:** POST001/002/003, ROT002 — first real hash-compute.
-- **Action:** boot the unit, then `secure_boot start`.
+- **Action:** boot the unit — POST runs automatically (`secure_boot start`
+  is autostarted via `rc.board_extras` since Day 8; no manual command needed).
+  Watch the boot log for the `secure_boot` POST lines.
+- **Autostart note (applies to every reboot-based test below):** since Day 8
+  POST/logger autostart at boot, so where a later step says "reboot,
+  `secure_boot start`" the reboot alone triggers POST — the manual command is
+  a redundant no-op ("already running"), and its POST output now appears in the
+  **boot log** rather than as a typed-command response. Evidence is unchanged
+  (boot log + `listener firmware_integrity_status` + the audit entry).
 - **Pass:** `POST: PASS`; `firmware_integrity_status.check_passed=true`;
   no `ARMING_BLOCKED` from integrity. The on-device libtomcrypt hash of
   the live flash equals the manifest's `code_hash` and `data_hash`, and
@@ -722,7 +804,7 @@ Where SITL says `pxh>`, hardware uses the `nsh>` / MAVLink Console prompt.
 - **Pass:** wrong/unsigned messages silently dropped FC-side; correct key
   gives full bidirectional link; `MAV_SIGN_CFG=1` enforced.
 
-## H9. Audit log — live panel + auto-FTP backfill (over USB)
+## H9. Audit log — live panel + auto-FTP backfill (over USB) ✅ PASS (2026-06-05 Day 8)
 
 - **Covers:** LOG001 viewer, FTP transport.
 - **Action:** open QGC Audit Log panel on connect.
@@ -730,6 +812,11 @@ Where SITL says `pxh>`, hardware uses the `nsh>` / MAVLink Console prompt.
   5 s apart — the 2026-05-24 hardening); all entries from
   `audit_log.bin` shown, sorted descending by `seq`, no dupes between
   backfill and the 10 Hz `INOFLY_AL` stream; new events appear live.
+- **Closed:** 2026-06-05 (Day 8) once BUG #7 was fixed (absolute FTP paths,
+  inoflyGCU `6351f519d`) and the logger autostarts (PX4 `354696551e`).
+  Download = 33 entries (33 valid) + `.sig`; live panel streams from boot.
+  First real FTP read over the USB link on hardware. Requires the logger to be
+  running — POST/logger autostart (Day 8) is what makes the live stream flow.
 
 ## H10. Audit log — offline RSA-2048 signature verification ✅ PASS (2026-05-28)
 
@@ -948,9 +1035,9 @@ provisioning per the Manufacturing Runbook.
 | H6 PAR001 enforcement | ✅ | 2026-05-30 Day 6 | BUG #5 fix flashed; over-cap + LOCKED rejected via nsh **and** QGC `PARAM_SET`; pre-arm gate blocks until CAPPED set |
 | H7 PAR001 audit (SD persist) | ✅ | 2026-05-27 / 2026-05-30 Day 6 | Day 6: PAR001 violations now persist (BUG #6/#6b fixed) — `#9`/`#10`, 11/11 CRC OK, `.sig` authentic |
 | H8 PAIR001 signing | ⬜ | | needs SiK telemetry |
-| H9 live panel + backfill | ⬜ | | works in SITL since 2026-05-24 |
+| H9 live panel + backfill | ✅ | 2026-06-05 Day 8 | BUG #7 fixed (absolute FTP paths); download 33 entries + `.sig`; live panel streams from boot (autostart) |
 | H10 offline sig verify | ✅ | 2026-05-28 / Day 5 | re-proven on 3-entry multi-event log |
-| H11 UPD001 accept | ✅ | 2026-06-04 Day 7 | FC accept proven via nsh; QGC bundle-verify green; FTP transport deferred (BUG #7) |
+| H11 UPD001 accept | ✅ | 2026-06-04 Day 7 / 2026-06-05 Day 8 | FC accept proven via nsh; QGC bundle-verify green; **Day 8** FTP transport fixed (absolute paths) → Install-on-Drone ACCEPTED |
 | H12 UPD001 reject (A+B) | ✅ | 2026-06-04 Day 7 | QGC red FAILED; FC CRC tamper → reason=2 |
 | H13 attacker-key reason=3 | ✅ | 2026-06-04 Day 7 | POST + verify_update + QGC all reject; libtomcrypt sig branch live |
 | H14 organic reason 4/5 | ✅ | 2026-06-04 Day 7 | **Tier 1 prize** — reason=4 (1.87 MB) + reason=5 (96 B, code→data ordering); restore → PASS |

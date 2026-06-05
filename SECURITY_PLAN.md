@@ -376,6 +376,18 @@ On firmware update (Path A — DFU):
     bootloader's BOOT001 signature check fails on next boot → won't run
 ```
 
+**App-firmware POST invocation (autostart, 2026-06-05).** The POST002/POST003
+app-firmware check runs inside the `secure_boot` module, which is **autostarted
+at boot** — `secure_boot start` is wired into the CubeOrange+
+`boards/cubepilot/cubeorangeplus/init/rc.board_extras` (and the SITL
+`init.d-posix/rcS`), so steps 5–7 above run on **every** boot with no operator
+action, blocking arming on an integrity mismatch. The same start also brings up
+the audit logger (LOG001) and its `INOFLY_AL` / `INOFLY_FW` live streams — a
+dormant logger was the root cause of the GCS Install-on-Drone timeout and empty
+live panel seen on hardware before this was wired. PX4 fork `354696551e`;
+verified on CubeOrange+ and SITL. Replaces the earlier manual bench-only
+`secure_boot start`.
+
 **Implementation:**
 - Patch the PX4 bootloader source (separate project from main firmware,
   located in PX4-Autopilot's bootloader fork — confirm path in WSL)
