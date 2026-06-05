@@ -39,6 +39,21 @@ exact pass criterion.
   older `PX4_SIM_MODEL=shell` runs; it can be stale. Always inspect the
   `rootfs/inofly/` copy when checking live FC state during a walkthrough.
 
+## 2a. SITL FTP path symlink (required before any FTP step: 9, 11, 12)
+
+- **Covers:** FTP transport parity with hardware (BUG #7)
+- **Why:** The QGC custom controllers send **absolute** FTP paths
+  (`/fs/microsd/inofly/...`) because on real NuttX hardware PX4's
+  `mavlink_ftp` `_root_dir` is `""` and a relative URI resolves to the
+  wrong place (FileNotFound). In SITL `_root_dir = "."`, so the absolute
+  path FTP builds is `./fs/microsd/inofly/...` — which needs a symlink to
+  the real `rootfs/inofly/`. Without this, the SITL audit-download and
+  Install-on-Drone FTP steps fail even though the FC wrote the files.
+- **Action:** `tools/sitl_ftp_symlink.sh` (idempotent; re-run after any
+  `rm -rf build/` or fresh rootfs).
+- **Pass:** prints `linked .../rootfs/fs/microsd/inofly -> ../../inofly`
+  and `ls` shows the link resolving to the populated `rootfs/inofly/`.
+
 ## 3. POST passes on boot
 
 - **Covers:** POST001, ROT002
