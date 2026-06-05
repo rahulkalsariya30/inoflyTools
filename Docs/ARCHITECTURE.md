@@ -2657,6 +2657,21 @@ factory bootloader. Trade-off accepted and recorded below: the applier is
 part of the TCB being replaced (residual risk), and under the *factory*
 bootloader there is no boot-time signature net to catch a bad write.
 
+**Update transport scope (decided 2026-06-05).** In-scope transports for
+delivering an authorized update are **USB** (primary, reliable) and
+**telemetry radio** (SiK / MAVLink, the wireless option). Companion-computer,
+WiFi-bridge, and SD-card-OTA paths are **deferred to productization**, not
+pursued now. Rationale: this matches the audit-reference peer — the audited reference ships
+**USB-wired signed `.apj` flashing with verify-before-flash and no OTA** — and
+keeps hardware scope to what we already have (USB cable + the SiK radio for
+H8/PAIR001). The app-fw-mediated apply path (this ADR) is **transport-agnostic**,
+so a faster transport (companion computer / WiFi / Ethernet — the credible
+"zero-touch fleet OTA" pattern, HSM-signed, which our single-keypair model
+already fits) can be added later without reworking the apply logic.
+**Accepted caveat:** SiK is fine for small artifacts (manifest, audit log,
+signing key) but a ~1.9 MB app-fw image over SiK is slow (minutes) and
+drop-sensitive — acceptable for now; not the path for routine field OTA.
+
 **Binding safety requirement (non-negotiable, the reason this ADR exists).**
 A verified *manifest* is not a verified *image*. Auto-flash MUST stage the
 new app-fw **image** alongside the manifest and, before erasing a single byte
