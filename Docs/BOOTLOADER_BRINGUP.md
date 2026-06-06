@@ -2,9 +2,11 @@
 
 **Document version:** 0.1 (draft, 2026-06-05)
 **Scope:** First-ever proof, on real CubeOrange+ silicon, that the
-**secure bootloader** (BOOT001 verify + BOOT005 DFU-refuse, installed via
-BOOT006 `bl_update`) builds, installs, enforces signatures, and hands off
-to the app fw — **and** that a bad install is recoverable.
+**secure bootloader** (BOOT001 verify, installed via BOOT006 `bl_update`)
+builds, installs, enforces signatures, and hands off to the app fw — **and**
+that a bad install is recoverable. (BOOT005 DFU-refuse is **deferred into
+ADR-023** by [ADR-024](ARCHITECTURE.md) — defense-in-depth, not part of this
+gate.)
 **Authority:** [ARCHITECTURE.md §12 ADR-013/014/015/022](ARCHITECTURE.md),
 [SECURITY_PLAN.md](../SECURITY_PLAN.md) BOOT001 / BOOT005 / BOOT006 / BOOT007.
 
@@ -19,11 +21,12 @@ to the app fw — **and** that a bad install is recoverable.
 | [MANUFACTURING_RUNBOOK.md](MANUFACTURING_RUNBOOK.md) (Steps 1–11) | How do we provision **each shipped unit**, assuming the gate passed? | Production |
 
 The runbook's Steps 4–7 (install → verify → positive → negative) are the
-**happy-path production version** of B2–B5 below. This gate proves those
+**happy-path production version** of B2–B4 below. This gate proves those
 steps actually work on real hardware the *first* time, adds the
 **recovery rehearsal (B0)** the runbook's happy path omits, and front-loads
-the **implementation-status pre-reqs** the runbook assumes are already met
-(see "Pre-reqs" — at least one, BOOT005, is currently unconfirmed).
+the **implementation-status pre-reqs** the runbook assumes are already met.
+(BOOT005/B5 is **deferred into ADR-023** — [ADR-024](ARCHITECTURE.md) — and
+is no longer a pre-req here.)
 
 **No SITL pre-gate for most of this.** Unlike the H-series (each mirrors a
 SITL §-step), the bootloader is hardware-boot code — it does not run under
@@ -36,11 +39,14 @@ first gate, not an afterthought.
 ## ⚠️ DECISION REQUIRED — which unit, and the brick risk
 
 Installing the secure bootloader is the **only irreversible-ish step in the
-whole program.** After BOOT006 + BOOT005:
+whole program.** After BOOT006 (BOOT005 is deferred — see
+[ADR-024](ARCHITECTURE.md)):
 
 - Sector 0 holds *our* bootloader; the factory bootloader is gone.
-- DFU is **software-refused** (BOOT005) — the normal "hold BOOT0, re-flash
-  over USB" recovery path is closed by our own code.
+- DFU/USB upload **still works** — BOOT005 is *not* part of this install
+  (deferred to ADR-023, default OFF), so the "re-flash over USB" recovery path
+  stays open. (When BOOT005 is eventually enabled, DFU is refused only while a
+  valid signed app is present — a no-app unit can still recover over USB.)
 - `bl_update` becomes the only software sector-0 write path — but
   `bl_update` lives **inside the app fw**, so it only helps if a *valid app
   fw is still running*. A bootloader that fails to hand off leaves no app fw
@@ -83,20 +89,23 @@ confirmed met* — that is the point of listing them.
 | # | Item | How to confirm | Status |
 |---|---|---|---|
 | BP1 | **BOOT001 verify is built into the bootloader.** TOC + `STUB_KEYSTORE` + `PUBLIC_KEY0` (manufacturer pubkey DER) + `sw_crypto`, per `boards/cubepilot/cubeorangeplus/bootloader.px4board`. | Build `cubeorangeplus_bootloader`; confirm the artifact links and the embedded key matches `pki/manufacturer/public/`. Artifact exists today (103,432 B, ≤128 KB sector 0). | ✅ likely (built; re-confirm key) |
-| BP2 | **BOOT005 DFU-refuse is built in.** ADR-014 specifies the secure bootloader software-refuses DFU (ArduPilot pattern). | **CONFIRMED NOT IMPLEMENTED** (2026-06-05). `platforms/nuttx/src/bootloader/stm/stm32_common/main.c` still uses stock PX4 mode-select: `jump_to_app()` on a valid app, else it drops into `bootloader(timeout)` — the standard DFU/USB upload loop — on USB-connect / no-app / timeout. The only Inofly change is BOOT001 (TOC verify, `bl.c:330`). No DFU-refuse exists, and no `bootloader_secure`/`bootloader_dev` split (runbook P1/P2 are aspirational). **Must be implemented** before B5. | ❌ **gap — implement (ADR-014)** |
+| BP2 | ~~**BOOT005 DFU-refuse is built in.**~~ ⚠️ **NOT a Phase 5b pre-req as of [ADR-024](ARCHITECTURE.md) (2026-06-05).** BOOT005 is **deferred into ADR-023** and reclassified to defense-in-depth (USB is behind the tamper seal → the seal, not BOOT005, closes Path A). It is **not implemented** (`stm32_common/main.c` still enters the stock `bootloader(timeout)` upload loop; only BOOT001 TOC-verify is wired) and **must not be built standalone** — it cannot be switched on until ADR-023's app-fw self-reflash exists, else a healthy unit becomes un-updatable over USB. Build it **with ADR-023**, flag `CONFIG_BOOTLOADER_REFUSE_DFU` default OFF. | ➖ **deferred to ADR-023 — not gating Phase 5b** |
 | BP3 | **Signed app fw already on the unit**, manufacturer-signed (same key as the bootloader's embedded pubkey). | The Tier-1 build is signed and flashed; confirm `ver all` matches the current signed release. | ✅ (Tier 1) |
 | BP4 | **Recovery toolchain staged** (Option B) or **spare unit ready** (Option A). | Probe + Cube DEBUG cable on hand; known-good factory sector-0 image captured (MANUFACTURING_RUNBOOK Step 2 reference hash / dump). | ⬜ decision-gated |
 | BP5 | **App-fw Tier 1 green on the build under test** (H0–H15, H8 carried). | [HARDWARE_ACCEPTANCE.md sign-off](HARDWARE_ACCEPTANCE.md). | ✅ |
 | BP6 | **Known-good app fw `.px4` on hand** to recover the *app-fw* side of B4's negative test. | The signed release `.px4` in `release/`. | ✅ |
 
-> **BP2 is the live blocker — and it is a code task, not just a check.**
-> Confirmed 2026-06-05: BOOT005 DFU-refuse is **not implemented**; the
-> bootloader still enters the standard DFU upload loop. Until it is added,
-> B5 cannot pass and the unit is not in the production threat model (DFU
-> stays open → the Path-A bypass ADR-014 exists to close is still open).
-> The fix is a targeted change to the mode-select in
-> `stm/stm32_common/main.c` (refuse the `bootloader(timeout)` DFU path on
-> the secure build — ArduPilot pattern), gated so dev builds keep DFU.
+> ⚠️ **BP2 is no longer a blocker — superseded by [ADR-024](ARCHITECTURE.md)
+> (2026-06-05).** BOOT005 DFU-refuse is **not implemented** and is **deferred
+> into ADR-023**, not Phase 5b. The threat-model reason: USB is *inside* the
+> tamper seal, so a USB/DFU attacker is already a seal-breaker who has SWD and
+> bypasses both BOOT001 and BOOT005 — **the seal closes Path A**, BOOT005 is
+> defense-in-depth (load-bearing only if a future airframe exposes USB outside
+> the seal). It is also coupled to ADR-023: the only path that writes an
+> app-fw image today *is* the DFU upload loop, so BOOT005 cannot be enabled
+> until app-fw self-reflash exists. **Phase 5b completion does not require B5.**
+> When ADR-023 is executed, build BOOT005 as a targeted mode-select change in
+> `stm/stm32_common/main.c` behind `CONFIG_BOOTLOADER_REFUSE_DFU` (default OFF).
 > **This is the first piece of Phase 5b work, and it is the one part that
 > does not need the bench** — implement + SITL-irrelevant unit-reason it,
 > then bring the whole gate to hardware.
@@ -164,22 +173,26 @@ spare, but rehearsing SWD reflash is still recommended.**
 - **Pass:** tampered app fw is rejected, fail-closed. **Fail (it boots):**
   release-blocking — BOOT001 is not enforcing; quarantine and fix.
 
-### B5 — BOOT005 DFU-refuse
-**Covers:** BOOT005; closes the Path-A/DFU bypass.
-**Blocked on BP2 (confirm DFU-refuse is actually built in).**
-- Attempt to enter DFU/USB-bootloader mode by the documented method for this
-  bootloader.
-- **The secure bootloader must refuse** to enter DFU.
-- **Pass:** DFU entry is refused on hardware. **Fail / not-applicable:** if
-  BP2 is unresolved, B5 cannot pass — DFU is still open and the unit is not
-  in the production threat model.
+### B5 — BOOT005 DFU-refuse ➖ DEFERRED (not a Phase 5b gate)
+**Covers:** BOOT005. ⚠️ **Moved to the ADR-023 work package by
+[ADR-024](ARCHITECTURE.md) (2026-06-05).** BOOT005 is defense-in-depth (the
+tamper seal closes Path A on this airframe) and is coupled to ADR-023's
+app-fw self-reflash (it cannot be enabled before that exists). **This step is
+not required for Phase 5b completion.** It will be exercised as part of
+ADR-023 execution, on a build with `CONFIG_BOOTLOADER_REFUSE_DFU` ON:
+- With a valid signed app present, attempt a USB upload → **must be refused**.
+- With no valid app (erased/blank), the upload loop **must open** (recovery /
+  first install).
+- **Pass (deferred):** DFU refused iff a verified app is present.
 
 ### B6 — `bl_update` remains the only sector-0 path / re-install idempotence
 **Covers:** BOOT006 robustness.
 - Re-run `bl_update` with the same binary; confirm idempotent re-install and
   a clean reboot (this is also the field-update mechanic under RMA).
-- Confirm no *other* software path writes sector 0 (DFU refused per B5; SWD
-  is hardware, gated by the seal in production).
+- Confirm no *other* software path writes sector 0 (DFU upload loop does not
+  write sector 0 — see [bootloader self-protection](ARCHITECTURE.md); SWD is
+  hardware, gated by the seal in production). BOOT005 is deferred (ADR-024)
+  and not relied on here.
 - **Pass:** re-install is clean and idempotent.
 
 ### B7 — SWD-open confirmation (pre-seal, expected) ℹ️
@@ -198,16 +211,19 @@ This gate is the prerequisite the [ADR-023](ARCHITECTURE.md) auto-flash work
 is sequenced behind: once B3/B4 prove BOOT001 enforces on every boot, a
 bad/interrupted app-fw self-reflash **fails closed at the next boot** instead
 of running unsigned code. Auto-flash moves from PROPOSED toward EXECUTED only
-after this gate is green.
+after this gate is green. **BOOT005 (DFU-refuse) is built as part of that
+ADR-023 work** — not this gate — because it can only be switched on once the
+self-reflash path gives healthy units a non-DFU way to update ([ADR-024](ARCHITECTURE.md)).
 
 ---
 
 ## Sign-off
 
-Phase 5b is complete when **B0–B7 pass on a real CubeOrange+** (B5 contingent
-on BP2), with the unit decision ratified and recovery proven. B0 and B4 are
-the load-bearing evidence: B0 proves the work was reversible, B4 proves the
-bootloader actually enforces.
+Phase 5b is complete when **B0–B4, B6, B7 pass on a real CubeOrange+**, with
+the unit decision ratified and recovery proven. **B5 (BOOT005) is deferred
+into the ADR-023 work package** ([ADR-024](ARCHITECTURE.md)) and is **not**
+required for Phase 5b sign-off. B0 and B4 are the load-bearing evidence: B0
+proves the work was reversible, B4 proves the bootloader actually enforces.
 
 | Step | Result | Date | Notes (commit hashes, board UID, probe used) |
 |---|---|---|---|

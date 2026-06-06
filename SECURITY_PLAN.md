@@ -93,11 +93,11 @@ factory seal.
 | LOG001 | Per-file RSA signed audit log              | Audit Logging      | ✅ Done (SITL)  |
 | UPD001 | Drone rejects unsigned firmware update    | Secure Update      | ✅ Done        |
 | PAIR001| GCS-FC pairing (MAVLink signing)          | GCS Locking        | ✅ Done (SITL)  |
-| BOOT001| Verifying bootloader — checks firmware signature on boot and pre-flash. ⚠️ **AMENDED 2026-05-04 (ADR-013):** bootloader integrity is now provided by bootstrap-trust (BOOT006) + software DFU-refuse (BOOT005) + tamper-evident seal (BOOT007), not by RDP L2. The verifying-bootloader check itself (BOOT001) is unchanged and still load-bearing. | Secure Boot | ⏳ Planned |
+| BOOT001| Verifying bootloader — checks firmware signature on boot and pre-flash. ⚠️ **AMENDED 2026-05-04 (ADR-013):** bootloader integrity is now provided by bootstrap-trust (BOOT006) + ~~software DFU-refuse (BOOT005)~~ + tamper-evident seal (BOOT007), not by RDP L2. (⚠️ **ADR-024 2026-06-05:** BOOT005 reclassified to DiD + deferred into ADR-023; the seal carries Path A.) The verifying-bootloader check itself (BOOT001) is unchanged and still load-bearing. | Secure Boot | ⏳ Planned |
 | ~~BOOT002~~ | ~~Manufacturer public key in STM32 OTP (hardware-locked)~~ ⚠️ **RETIRED 2026-05-04 (ADR-013).** ✅ **CURRENT:** pubkey is embedded in the bootloader binary; OTP is not used. | ~~Root of Trust~~ | 🚫 Retired |
 | ~~BOOT003~~ | ~~RDP Level 2 burn — chip-level DFU/debug lockdown~~ ⚠️ **RETIRED 2026-05-04 (ADR-013).** ✅ **CURRENT:** Path A is closed by software DFU-refuse (BOOT005); SWD/JTAG access is gated by tamper-evident sealing (BOOT007). | ~~Tamper Resist~~ | 🚫 Retired |
 | BOOT004| Flash encryption (AES) — productization / Level 2/3 only         | Confidentiality | ⏳ Deferred (ADR-004) |
-| BOOT005| Software DFU-refuse in the secure bootloader (closes Path A)     | Secure Boot     | ⏳ Planned (Phase 5b) |
+| BOOT005| ~~Software DFU-refuse in the secure bootloader (closes Path A)~~ → defense-in-depth; seal closes Path A (ADR-024) | Secure Boot | ➖ Deferred into ADR-023 (not a Phase 5b gate) |
 | BOOT006| `bl_update` / ROMFS-bundled secure bootloader (install path; bootstrap-trust root) | Secure Boot | ⏳ Planned (Phase 5b) |
 | BOOT007| Tamper-evident sealing + STM32 96-bit UID + seal-serial tracking (compensating control for the physical-attacker class) | Tamper Resist | ⏳ Planned (Phase 5b) |
 
@@ -485,6 +485,23 @@ added for productization or Level 2/3 parity. See ADR-004 in
 [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md).
 
 ### BOOT005 — Secure bootloader software DFU-refuse (closes Path A) ⭐ NEW 2026-05-04 (ADR-014)
+
+> ⚠️ **AMENDED 2026-06-05 ([ADR-024](Docs/ARCHITECTURE.md)) — read first.**
+> BOOT005 is **reclassified from a load-bearing Path-A closure to
+> defense-in-depth**, is **not implemented**, and is **deferred into ADR-023**.
+> Three corrections to everything below: **(1)** On our airframe USB sits
+> *inside* the tamper seal, so a USB/DFU attacker is already a seal-breaker who
+> has SWD and bypasses both BOOT001 and BOOT005 — **the tamper seal (BOOT007),
+> not BOOT005, is what closes Path A.** BOOT001 already ensures unsigned
+> firmware can't *run*; BOOT005 would only add anti-brick / anti-rollback over
+> an *exposed* USB port, which we don't have. **(2)** The "DFU" refused is the
+> PX4 `px_uploader` upload loop, not the STM32 ROM DFU loader. **(3)** BOOT005
+> can't be switched on until ADR-023's app-fw self-reflash exists (today the
+> only path that writes an app-fw image *is* the DFU upload loop), so it ships
+> **with ADR-023**, flag `CONFIG_BOOTLOADER_REFUSE_DFU` default OFF, and is
+> **not a Phase 5b gate.** Wherever this section says BOOT005 "closes Path A,"
+> read: *the seal closes Path A; BOOT005 is defense-in-depth for future
+> USB-exposed airframes.*
 
 **What this closes.** Path A is the stock STM32 DFU bootloader (USB +
 BOOT pin). On the H743 there is no chip-level switch to disable DFU

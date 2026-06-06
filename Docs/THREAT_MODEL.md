@@ -21,12 +21,27 @@
 > rows have been amended in place using the project-wide
 > strikethrough+current convention. Section 7 attack-tree narrative
 > uses the same convention.
+>
+> ⚠️ **FURTHER AMENDED — 2026-06-05 ([ADR-024](ARCHITECTURE.md)).**
+> **BOOT005 (software DFU-refuse) is reclassified from a load-bearing
+> mitigation to defense-in-depth, is not implemented, and is deferred into
+> ADR-023.** Throughout T10/T11/T12'/Section 7, BOOT005 is listed alongside
+> BOOT006/BOOT007 in the compensating-control bundle — but on our airframe USB
+> sits *inside* the tamper seal, so a USB/DFU attacker is already a seal-breaker
+> with SWD (who bypasses BOOT001 *and* BOOT005). **The load-bearing controls
+> are BOOT001 (unsigned won't run) + BOOT007 (seal makes physical USB/SWD
+> access tamper-evident) + BOOT006 (signed `bl_update`).** Read every BOOT005
+> citation below as defense-in-depth that becomes load-bearing only for a
+> future airframe that exposes USB *outside* the seal. The residual-risk
+> ratings ("Low on sealed production units") are unchanged because they already
+> rest on the seal, not on BOOT005.
 
 **Changes since 1.1 (2026-05-04):**
 - Section 6 boundaries: explicit physical-attacker-out-of-scope
   statement, with the compensating procedural controls listed
 - T10 (DFU bypass): mitigation amended — software DFU-refuse (BOOT005)
-  replaces RDP-L2 chip-level disable
+  replaces RDP-L2 chip-level disable (⚠️ **further amended 2026-06-05, ADR-024:**
+  BOOT005 → defense-in-depth + deferred; the tamper seal carries T10)
 - T11 (Custom bootloader replacement): mitigation amended — bootstrap-
   trust (BOOT006) + tamper-evident seal (BOOT007) replace RDP-L2 SWD
   disable
@@ -244,8 +259,8 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | T7 — Telemetry spoofing | **Low** | Low |
 | T8 — Flash corruption | **Low** | Low |
 | T9 — Board ID mismatch | **Medium** | Low |
-| T10 — DFU (Path A) bypass | **High** (Phase 5b open) | ~~Low (BOOT001) → None (BOOT003)~~ ✅ Low (BOOT001 + BOOT005 software DFU-refuse) |
-| T11 — Bootloader replacement | **High** (no seal, no DFU-refuse) | ~~None (RDP L2)~~ ✅ Low at crypto layer on sealed production units (BOOT005 + BOOT006 + BOOT007); physical-attacker residual handled procedurally |
+| T10 — DFU (Path A) bypass | **High** (Phase 5b open) | ~~Low (BOOT001) → None (BOOT003)~~ ~~✅ Low (BOOT001 + BOOT005)~~ → **Low: BOOT001 + tamper seal (BOOT007)**; BOOT005 = DiD, deferred into ADR-023 (ADR-024) |
+| T11 — Bootloader replacement | **High** (no seal, no DFU-refuse) | ~~None (RDP L2)~~ ✅ Low at crypto layer on sealed production units (**BOOT006 + BOOT007**; BOOT005 = DiD/deferred per ADR-024); physical-attacker residual handled procedurally |
 | ~~T12 — OTP key tampering~~ | ~~**None**~~ | ~~None (hardware-enforced)~~ 🚫 Retired — see T12' |
 | T12' — Bootloader-embedded pubkey tampering ⭐ | **High** (Phase 5b open) | Low at crypto layer on sealed production units (same controls as T11); physical-attacker residual handled procedurally |
 | T13 — Debugger verify skip | **High** (no seal) | ~~None (RDP L2)~~ ✅ Low at crypto layer on sealed production units (BOOT007); RMA inspection workflow for the seal-breaking case |
@@ -265,9 +280,9 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | T7 | ARM001 | Arming Gate |
 | T8 | POST001 (CRC32) | POST |
 | T9 | POST004 | POST |
-| T10 | BOOT001, ~~BOOT003~~ ✅ BOOT005 | Secure Boot, Tamper Resistance |
-| T11 | ~~BOOT003~~ ✅ BOOT005 + BOOT006 + BOOT007 | Tamper Resistance (operational lockdown — bootstrap-trust + seal) |
-| ~~T12~~ → T12' | ~~BOOT002~~ ✅ BOOT005 + BOOT006 + BOOT007 | Root of Trust (bootloader-embedded pubkey, protected operationally) |
+| T10 | BOOT001 + BOOT007 (seal); ~~BOOT003~~ ~~BOOT005~~ → BOOT005 DiD/deferred (ADR-024) | Secure Boot, Tamper Resistance |
+| T11 | ~~BOOT003~~ ✅ BOOT006 + BOOT007 (BOOT005 DiD/deferred — ADR-024) | Tamper Resistance (operational lockdown — bootstrap-trust + seal) |
+| ~~T12~~ → T12' | ~~BOOT002~~ ✅ BOOT006 + BOOT007 (BOOT005 DiD/deferred — ADR-024) | Root of Trust (bootloader-embedded pubkey, protected operationally) |
 | T13 | ~~BOOT003~~ ✅ BOOT007 | Tamper Resistance (seal-gated SWD path + RMA inspection) |
 
 ---

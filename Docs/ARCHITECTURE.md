@@ -720,11 +720,20 @@ must be gated.
 - ~~**Post-BOOT003 state:** RDP Level 2 disables DFU writes at the chip
   level. DFU bootloader still runs but its commands are rejected by
   silicon. Path A is fully closed.~~ ⚠️ **AMENDED 2026-05-04 (ADR-014).**
-- ✅ **Post-ADR-014 state:** the secure bootloader software-refuses
-  DFU mode entry. The ROM DFU loader is never invoked, so the host
-  PC cannot enumerate a DFU device. Path A is fully closed at the
-  software layer. SWD remains blocked operationally by the
-  tamper-evident seal (out-of-scope physical attacker class).
+- ✅ **Post-ADR-014 state (as designed):** the secure bootloader
+  software-refuses the px_uploader upload loop, so the host PC cannot push
+  bytes over USB. SWD remains blocked operationally by the tamper-evident
+  seal (out-of-scope physical attacker class).
+- ⚠️ **AMENDED 2026-06-05 ([ADR-024](#adr-024--boot005-dfu-refuse-reclassified-to-defense-in-depth-deferred-into-adr-023-2026-06-05-amends-adr-014)).**
+  Two corrections: (1) this DFU-refuse (**BOOT005**) is **not implemented**
+  and is **deferred into ADR-023** (it cannot be enabled until app-fw
+  self-reflash exists). (2) Calling it the closure of Path A is **overstated**:
+  because USB is *inside* the tamper seal, a USB/DFU attacker is already a
+  seal-breaker who has SWD and bypasses both BOOT001 and BOOT005 — so for this
+  airframe **the seal is what closes Path A**, and BOOT005 is defense-in-depth
+  (load-bearing only if a future airframe exposes USB outside the seal). What
+  actually holds today: **BOOT001** (unsigned won't run) + **tamper seal**
+  (physical USB/SWD access is detectable) + **no OTA** + **UPD001**.
 
 ### 8.2 Path B — MAVLink-FTP (signed `.fwbundle` via QGC)
 
@@ -743,7 +752,7 @@ must be gated.
 
 | Path | Gated by (today, pre-Phase-5b) | Gated by (post-Phase-5b) |
 |---|---|---|
-| Path A (DFU) | Nothing — OPEN GAP | BOOT001 (firmware refuses to launch) + ~~BOOT003 (DFU dead)~~ ✅ **ADR-014 software DFU-refuse** |
+| Path A (DFU) | Nothing — OPEN GAP | BOOT001 (firmware refuses to launch) + **tamper seal** (USB/SWD behind it — the actual control) + ~~BOOT003 (DFU dead)~~ ~~✅ ADR-014 software DFU-refuse~~ → **defense-in-depth, deferred into ADR-023 ([ADR-024](#adr-024--boot005-dfu-refuse-reclassified-to-defense-in-depth-deferred-into-adr-023-2026-06-05-amends-adr-014))** |
 | Path B (MAVLink-FTP) | UPD001 (QGC + FC verify) | UPD001 + BOOT001 (bootloader re-verify) |
 
 After Phase 5b, **every byte of code the CPU executes was signed by
@@ -1498,6 +1507,17 @@ security architecture as ArduPilot" story for the auditor.
   or MAVProxy `flashbootloader`.
 
 ### ADR-014 — Secure bootloader refuses DFU mode (2026-05-04, supersedes ADR-010 Path A)
+
+> ⚠️ **AMENDED 2026-06-05 by [ADR-024](#adr-024--boot005-dfu-refuse-reclassified-to-defense-in-depth-deferred-into-adr-023-2026-06-05-amends-adr-014).**
+> BOOT005 is **reclassified from load-bearing Path-A closure to
+> defense-in-depth** (USB is behind the tamper seal, so a USB/DFU attacker is
+> already a seal-breaker with SWD, which bypasses both BOOT001 and BOOT005 —
+> the seal is the real control). It is **not implemented**, is **deferred into
+> ADR-023** (it cannot be switched on until app-fw self-reflash exists, else a
+> healthy unit becomes un-updatable over USB), and the "ROM DFU loader" wording
+> below should be read as the **PX4 `px_uploader` upload loop**. The mechanism
+> described here stays the eventual implementation; only its criticality and
+> sequencing change. Read ADR-024 first.
 
 **Decision:** The secure (signed) variant of the PX4 bootloader
 contains a software check that **refuses to enter DFU mode** when it
@@ -2743,6 +2763,95 @@ ADR *adds* an apply step after verification; it removes no existing check.
   DGCA-compliant (Gazette mandates *signed* updates, not *automatic* ones).
   This ADR is a usability/operability improvement, not a compliance gap
   closure — which is why it is PROPOSED, not urgent.
+
+### ADR-024 — BOOT005 (DFU-refuse) reclassified to defense-in-depth, deferred into ADR-023 (2026-06-05, amends ADR-014)
+
+**Status:** 📝 Reclassification + finding. **No code.** BOOT005 remains
+**not implemented** (confirmed against PX4 source 2026-06-05 — only BOOT001
+TOC-verify is wired; `stm32_common/main.c` still enters the stock upload
+loop). This ADR records *why* BOOT005 is no longer treated as a load-bearing
+Path-A closure, and folds its eventual implementation into ADR-023.
+
+**What changed.** ADR-014 framed software DFU-refuse as the mechanism that
+**closes Path A** — "same end property as BOOT003 (RDP L2)." Walking the
+threat model against the *actual* deployment decisions (USB port location +
+tamper seal + how updates really apply) shows that claim is overstated.
+BOOT005 is **defense-in-depth, not load-bearing**, for the CubeOrange+
+airframe we ship.
+
+**Threat-model reasoning (the finding).**
+- **USB and SWD are *both* behind the tamper-evident seal** (BOOT007 /
+  ADR-013) on our airframe. Reaching either requires breaking the seal, which
+  is tamper-evident.
+- A **seal-breaking attacker** therefore has **SWD**, and SWD rewrites flash
+  *including sector 0* — bypassing **both** BOOT001 and BOOT005. Against this
+  attacker, BOOT005 protects nothing; the **seal (detection) is the only
+  control**.
+- A **non-seal-breaking attacker** cannot reach USB at all (it is inside the
+  seal), so there is no DFU surface for BOOT005 to defend.
+- There is no in-between attacker, because the seal gates USB and SWD
+  together. So the property we actually need — *"only manufacturer-signed
+  firmware runs, and outsiders cannot push firmware"* — is **already delivered
+  by BOOT001 (verify-before-boot) + tamper seal (BOOT007) + no-OTA + UPD001**
+  *without* BOOT005. The residual risks BOOT005 would close (USB **brick** /
+  **rollback-to-old-signed**) all require breaking the seal first, at which
+  point SWD makes them moot.
+- BOOT005 becomes **load-bearing only if a future airframe exposes USB
+  *outside* the seal.** That is a productization scenario, not our current one
+  — hence keep BOOT005 as an opt-in **flagged capability**, not a default.
+
+**Mechanism correction.** The "DFU" BOOT005 refuses is **not** the STM32H7 ROM
+DFU loader (the CubeOrange+ carriers have no externally accessible BOOT0 — see
+the 2026-05-04 amendment). It is the **PX4 `px_uploader` upload loop** inside
+the PX4 bootloader (`bootloader(timeout)` in
+[`stm32_common/main.c`](../../PX4-Autopilot/platforms/nuttx/src/bootloader/stm/stm32_common/main.c)),
+reached over USB CDC. Wherever ADR-014 and §8.1 say "ROM DFU loader is never
+invoked," read it as "the px_uploader upload loop is not entered." The end
+behaviour (host PC cannot push bytes) is the same; the layer is different.
+
+**Why it is coupled to ADR-023 (and cannot be turned on before it).** Today
+the *only* path that actually writes an app-fw image to flash is QGC →
+reboot-to-bootloader → `px_uploader` — i.e. **the DFU upload loop itself**
+(ADR-023 "Context": `verify_update` never writes flash; the image is delivered
+separately by the standard wire-protocol upload). So switching BOOT005 **on**
+while a valid app is present would refuse that path and leave a healthy unit
+**un-updatable over USB**. The mechanism that lets a signed update apply
+*without* the DFU loop is ADR-023's **app-fw-orchestrated self-reflash**, which
+does not exist yet. Therefore BOOT005 must be **built and tested together with
+ADR-023** and **defaults OFF** until that self-reflash path exists. This
+matches the recorded sequencing (bootloader bring-up → then ADR-023 execution).
+
+**Decision.**
+1. **Do not implement BOOT005 standalone now.** Build it as part of executing
+   ADR-023, so it is tested with the update path it gates.
+2. When built: a **separate kconfig flag** (`CONFIG_BOOTLOADER_REFUSE_DFU`),
+   **independent of `CONFIG_BOARD_CRYPTO`**, **default OFF for CubeOrange+**.
+   Behaviour when ON: the bootloader's only job is verify-and-boot (BOOT001);
+   it enters the upload loop **iff there is no valid, signature-verified app**
+   (recovery / first install), and refuses it whenever a verified app is
+   present. A USB-only attacker cannot reach the "no valid app" state on a
+   healthy unit because erasing the app itself requires the (refused) upload
+   loop or SWD (sealed).
+3. **B5 is no longer a Phase 5b completion gate.** Phase 5b (root of trust) is
+   the **BOOT001** bring-up — B0–B4, B6, B7 in
+   [BOOTLOADER_BRINGUP.md](BOOTLOADER_BRINGUP.md). BOOT005/B5 moves to the
+   ADR-023 work package.
+
+**Alternatives considered.**
+- *Implement now, flag OFF (ready-but-dormant).* Rejected: it cannot be
+  switched on until ADR-023 exists anyway, so it would sit untested-in-anger
+  and risk bit-rot; cleaner to build it with the path it gates.
+- *Drop BOOT005 entirely.* Rejected: it is a cheap productization hedge for
+  vendor airframes that expose USB, and removing a documented control outright
+  is the kind of change the project avoids. Keep it flagged, deferred.
+
+**What does NOT change.** BOOT001 (verify-before-boot) — the actual root of
+trust — is unchanged and stays the Phase 5b priority. Tamper seal (BOOT007),
+bootstrap-trust (ADR-015), UPD001 manifest verification, and ADR-023's binding
+safety requirement are all unchanged. ADR-014 is **amended (not superseded)**:
+its mechanism is still the eventual implementation; only its *criticality
+classification* (load-bearing → defense-in-depth) and *sequencing* (standalone
+→ part of ADR-023) change.
 
 ---
 
