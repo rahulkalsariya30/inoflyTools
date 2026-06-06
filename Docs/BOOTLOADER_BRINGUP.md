@@ -1,6 +1,6 @@
 # Secure Bootloader Bring-Up Gate (Phase 5b) — Engineering Acceptance
 
-**Document version:** 0.2 (draft, 2026-06-06)
+**Document version:** 0.3 (draft, 2026-06-06)
 **Scope:** First-ever proof, on real CubeOrange+ silicon, that the
 **secure bootloader** (BOOT001 verify, installed via BOOT006 `bl_update`)
 builds, installs, enforces signatures, and hands off to the app fw — **and**
@@ -91,7 +91,7 @@ confirmed met* — that is the point of listing them.
 | BP1 | **BOOT001 verify is built into the bootloader.** TOC + `STUB_KEYSTORE` + `PUBLIC_KEY0` (manufacturer pubkey DER) + `sw_crypto`, per `boards/cubepilot/cubeorangeplus/bootloader.px4board`. | Build `cubeorangeplus_bootloader`; confirm the artifact links and the embedded key matches `pki/manufacturer/public/`. Artifact exists today (103,432 B, ≤128 KB sector 0). | ✅ likely (built; re-confirm key) |
 | BP2 | ~~**BOOT005 DFU-refuse is built in.**~~ ⚠️ **NOT a Phase 5b pre-req as of [ADR-024](ARCHITECTURE.md) (2026-06-05).** BOOT005 is **deferred into ADR-023** and reclassified to defense-in-depth (USB is behind the tamper seal → the seal, not BOOT005, closes Path A). It is **not implemented** (`stm32_common/main.c` still enters the stock `bootloader(timeout)` upload loop; only BOOT001 TOC-verify is wired) and **must not be built standalone** — it cannot be switched on until ADR-023's app-fw self-reflash exists, else a healthy unit becomes un-updatable over USB. Build it **with ADR-023**, flag `CONFIG_BOOTLOADER_REFUSE_DFU` default OFF. | ➖ **deferred to ADR-023 — not gating Phase 5b** |
 | BP3 | **Signed app fw already on the unit**, manufacturer-signed (same key as the bootloader's embedded pubkey). | The Tier-1 build is signed and flashed; confirm `ver all` matches the current signed release. | ✅ (Tier 1) |
-| BP4 | **Recovery toolchain staged** (Option B — chosen 2026-06-06). | Probe (ST-Link V3 / J-Link) + Cube 6-pin DEBUG cable on hand; known-good factory sector-0 image captured (MANUFACTURING_RUNBOOK Step 2 reference hash / dump — captured in B0 step 2). | ⬜ **procurement-gated** (probe + cable to acquire) |
+| BP4 | **Recovery toolchain staged** (Option B — chosen 2026-06-06). **Kit ordered 2026-06-06:** SWD probe (ST-Link V2 — use **STM32CubeProgrammer** on Windows; or DAPLINK/ST-Link V3) **+ a 6-pin JST SUR 0.8 mm pigtail** (housing `06SUR-32S`, contacts `SSHL-002T-P0.2`). ⚠️ **Connector correction:** the standard carrier board does **not** break out SWD — the only SWD access is the Cube's **internal FMU SWD connector** (`SM06B-SURS-TF`, JST SUR **0.8 mm**), reached by **opening the Cube case** (fine — bring-up unit is unsealed). Wire **SWDIO(4)/SWCLK(5)/GND(6)** to the probe; power the Cube over USB-C; VTref = **3.3 V**, never the connector's pin-1 (5 V). Known-good factory sector-0 image is captured in B0 step 2. | 🟡 **ordered — awaiting delivery** |
 | BP5 | **App-fw Tier 1 green on the build under test** (H0–H15, H8 carried). | [HARDWARE_ACCEPTANCE.md sign-off](HARDWARE_ACCEPTANCE.md). | ✅ |
 | BP6 | **Known-good app fw `.px4` on hand** to recover the *app-fw* side of B4's negative test. | The signed release `.px4` in `release/`. | ✅ |
 
@@ -121,8 +121,11 @@ Run in order. B0 is a hard gate: **do not run B2 until B0 passes.**
 **Only required for Option B (single unit); for Option A, recovery = use the
 spare, but rehearsing SWD reflash is still recommended.**
 
-1. With the unit running its current (factory or stock) bootloader, connect
-   the SWD probe to the Cube 6-pin DEBUG port.
+1. With the unit running its current (factory or stock) bootloader, **open
+   the Cube case** and connect the SWD probe to the **internal FMU SWD
+   connector** (`SM06B-SURS-TF`, JST SUR 0.8 mm — the one *not* nearest the
+   servo rail; GND is the pin furthest from the servo rail). The standard
+   carrier board does not expose SWD. Wire SWDIO/SWCLK/GND; power via USB-C.
 2. Dump sector 0 (128 KB @ `0x08000000`) and save it as the **known-good
    image** + record its SHA-256 (this is also MANUFACTURING_RUNBOOK Step 2's
    factory reference hash — capture it here).
@@ -230,7 +233,7 @@ proves the work was reversible, B4 proves the bootloader actually enforces.
 | Unit decision (A / B) | ✅ **B** | 2026-06-06 | Single Tier-1 unit + pre-staged SWD recovery. B0 is the hard gate; BP4 must be staged before B2. |
 | BP1 BOOT001 built | ✅ | 2026-06-06 | Off-hw re-confirm: embedded SPKI DER == `manufacturer_public.pem` (full 294-B DER @ `0x17853`, 256-B modulus @ `0x17874`) in `bootloader_artifact/cubepilot_cubeorangeplus_bootloader.bin`. |
 | BP2 BOOT005 built | ➖ **deferred** | 2026-06-06 | **Not a Phase 5b pre-req** — [ADR-024](ARCHITECTURE.md): BOOT005 reclassified to defense-in-depth, deferred into ADR-023. |
-| BP4 recovery staged | ⬜ | | **Option B blocker** — SWD probe (ST-Link V3 / J-Link) + Cube 6-pin DEBUG cable + known-good sector-0 image |
+| BP4 recovery staged | 🟡 ordered | 2026-06-06 | ST-Link V2 (+ STM32CubeProgrammer) **+ 6-pin JST SUR 0.8 mm pigtail** (`06SUR-32S`/`SSHL-002T-P0.2`) for the Cube **internal** FMU SWD connector (`SM06B-SURS-TF`; carrier does NOT break out SWD — open the case). Awaiting delivery. |
 | B0 recovery rehearsal | ⬜ | | **hard gate before B2** |
 | B1 build valid | ✅ | 2026-06-06 | Off-hw: size 103,432 B ≤ 128 KB; vector table valid (SP `0x24001D0E` AXI SRAM, reset `0x08000305` sector-0 Thumb); embedded key matches (see BP1). Artifact = `bootloader_artifact/...bin`. |
 | B2 install (BOOT006) | ⬜ | | |
@@ -248,3 +251,4 @@ proves the work was reversible, B4 proves the bootloader actually enforces.
 |---|---|---|
 | 0.1 | 2026-06-05 | Initial draft. Engineering bring-up gate for the secure bootloader (B0–B7), the unit/brick-risk decision (recovery-first), and the Phase 0 pre-reqs. Surfaces the BOOT005 DFU-refuse implementation gap (BP2). |
 | 0.2 | 2026-06-06 | **Unit decision ratified: Option B** (single Tier-1 unit + pre-staged SWD recovery). Sign-off + BP4 rows updated; stale BP2/B5 BOOT005 sign-off rows reconciled with [ADR-024](ARCHITECTURE.md) (deferred, not gating). **BP1 + B1 closed off-hardware** (artifact size/vector-table valid, embedded SPKI DER == manufacturer pubkey). Remaining B0/B2/B3/B4/B6/B7 are hardware-only — blocked on BP4 (procure SWD probe + Cube DEBUG cable), then B0 recovery rehearsal (hard gate). |
+| 0.3 | 2026-06-06 | **BP4 kit ordered** — ST-Link V2 (+ STM32CubeProgrammer) + 6-pin JST SUR 0.8 mm pigtail (`06SUR-32S`/`SSHL-002T-P0.2`). **Connector correction:** standard carrier board does **not** break out SWD; SWD access is the Cube's **internal** FMU SWD connector (`SM06B-SURS-TF`, JST SUR 0.8 mm) — open the case (bring-up unit is unsealed). B0 step 1 + BP4 rows updated accordingly. Awaiting delivery → then B0. |
