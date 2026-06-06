@@ -1,6 +1,6 @@
 # Secure Bootloader Bring-Up Gate (Phase 5b) — Engineering Acceptance
 
-**Document version:** 0.3 (draft, 2026-06-06)
+**Document version:** 0.4 (draft, 2026-06-06)
 **Scope:** First-ever proof, on real CubeOrange+ silicon, that the
 **secure bootloader** (BOOT001 verify, installed via BOOT006 `bl_update`)
 builds, installs, enforces signatures, and hands off to the app fw — **and**
@@ -91,7 +91,7 @@ confirmed met* — that is the point of listing them.
 | BP1 | **BOOT001 verify is built into the bootloader.** TOC + `STUB_KEYSTORE` + `PUBLIC_KEY0` (manufacturer pubkey DER) + `sw_crypto`, per `boards/cubepilot/cubeorangeplus/bootloader.px4board`. | Build `cubeorangeplus_bootloader`; confirm the artifact links and the embedded key matches `pki/manufacturer/public/`. Artifact exists today (103,432 B, ≤128 KB sector 0). | ✅ likely (built; re-confirm key) |
 | BP2 | ~~**BOOT005 DFU-refuse is built in.**~~ ⚠️ **NOT a Phase 5b pre-req as of [ADR-024](ARCHITECTURE.md) (2026-06-05).** BOOT005 is **deferred into ADR-023** and reclassified to defense-in-depth (USB is behind the tamper seal → the seal, not BOOT005, closes Path A). It is **not implemented** (`stm32_common/main.c` still enters the stock `bootloader(timeout)` upload loop; only BOOT001 TOC-verify is wired) and **must not be built standalone** — it cannot be switched on until ADR-023's app-fw self-reflash exists, else a healthy unit becomes un-updatable over USB. Build it **with ADR-023**, flag `CONFIG_BOOTLOADER_REFUSE_DFU` default OFF. | ➖ **deferred to ADR-023 — not gating Phase 5b** |
 | BP3 | **Signed app fw already on the unit**, manufacturer-signed (same key as the bootloader's embedded pubkey). | The Tier-1 build is signed and flashed; confirm `ver all` matches the current signed release. | ✅ (Tier 1) |
-| BP4 | **Recovery toolchain staged** (Option B — chosen 2026-06-06). **Kit ordered 2026-06-06:** SWD probe (ST-Link V2 — use **STM32CubeProgrammer** on Windows; or DAPLINK/ST-Link V3) **+ a 6-pin JST SUR 0.8 mm pigtail** (housing `06SUR-32S`, contacts `SSHL-002T-P0.2`). ⚠️ **Connector correction:** the standard carrier board does **not** break out SWD — the only SWD access is the Cube's **internal FMU SWD connector** (`SM06B-SURS-TF`, JST SUR **0.8 mm**), reached by **opening the Cube case** (fine — bring-up unit is unsealed). Wire **SWDIO(4)/SWCLK(5)/GND(6)** to the probe; power the Cube over USB-C; VTref = **3.3 V**, never the connector's pin-1 (5 V). Known-good factory sector-0 image is captured in B0 step 2. | 🟡 **ordered — awaiting delivery** |
+| BP4 | **Recovery toolchain staged** (Option B — chosen 2026-06-06). **Kit ordered 2026-06-06:** SWD probe (ST-Link V2 — use **STM32CubeProgrammer** on Windows; or DAPLINK/ST-Link V3) **+ a 6-pin JST SUR 0.8 mm pigtail** (housing `06SUR-32S`, contacts `SSHL-002T-P0.2`). ⚠️ **Connector correction:** the standard carrier board does **not** break out SWD — the only SWD access is the Cube's **internal FMU SWD connector** (`SM06B-SURS-TF`, JST SUR **0.8 mm**), reached by **opening the Cube case** (fine — bring-up unit is unsealed). Wire **SWDIO(4)/SWCLK(5)/GND(6)** to the probe; power the Cube over USB-C; VTref = **3.3 V**, never the connector's pin-1 (5 V). Known-good factory sector-0 image is captured in B0 step 2. **Recovery method is tiered — see [B0 verified SWD-connect procedure](#b0--verified-swd-connect-procedure-research-2026-06-06).** ⚠️ **Gap:** the kit covers Tier 1 (plain attach) only; the Tier-2 connect-under-reset fallback needs an **NRST tap at DF17 pin 7** (internal, not on the SUR connector) — stage if Tier 1 is flaky. | 🟡 **ordered — awaiting delivery (Tier-1 kit; NRST tap not yet staged)** |
 | BP5 | **App-fw Tier 1 green on the build under test** (H0–H15, H8 carried). | [HARDWARE_ACCEPTANCE.md sign-off](HARDWARE_ACCEPTANCE.md). | ✅ |
 | BP6 | **Known-good app fw `.px4` on hand** to recover the *app-fw* side of B4's negative test. | The signed release `.px4` in `release/`. | ✅ |
 
@@ -137,6 +137,38 @@ spare, but rehearsing SWD reflash is still recommended.**
    unit to a booting one. Recovery is proven; B2–B5 are now reversible.
    **Fail:** stop. Do not install the secure bootloader on this unit
    (regress to Option A).
+
+#### B0 — verified SWD-connect procedure (research 2026-06-06)
+Researched against CubePilot forum reports + ST community + PX4 SWD docs.
+SWD recovery of a Cube Orange is **proven** (forum users flash via the
+internal `SM06B` FMU debug connector with ST-Link V2 + OpenOCD/gdb). Use a
+**tiered** approach — try Tier 1 first, escalate only if it fails:
+
+- **Tier 1 — plain SWD attach (try first).** NRST is *optional* (PX4: "most
+  devices can be reset via the SWD lines"). Our brick is a bad **sector-0
+  bootloader** that runs only briefly before failing hand-off, on an
+  **unlocked** chip (no RDP burned), so SWD pins stay default early in boot.
+  Wire **SWDIO(4)/SWCLK(5)/GND(6) + VREF 3.3 V**; power the Cube over USB-C;
+  use a **low SWD clock** (long flying leads). Tool: **STM32CubeProgrammer**
+  (mode = Normal) or OpenOCD. Read sector 0 to confirm the link before
+  trusting it.
+- **Tier 2 — connect-under-reset (the "No STM32 target found" fix).** If a
+  running/looping bootloader blocks Tier-1 attach: CubeProgrammer **reset
+  mode = Hardware reset, mode = Connect under reset** (or hold reset low,
+  start connect, release). **This needs NRST**, which is **`FMU_!RESET` on
+  DF17 pin 7 — NOT on the 6-pin SUR connector.** Pre-stage an NRST tap
+  (DF17 pin 7 internally) as the fallback. *(Your ordered kit does not cover
+  this — see BP4.)*
+- **Tier 3 — BOOT0 → ROM USB DFU (nuclear, no probe).** "*Break open the
+  case and manually pull up the BOOT0 line on power up*" → STM32 system
+  bootloader → reflash over USB with CubeProgrammer. BOOT0 is internal with
+  **no documented pad** and is manufacturer-discouraged. Last resort only.
+
+> All three tiers require **opening the Cube** (SWD connector, NRST, BOOT0
+> are all internal). Damage risk is to the **bottom plastic shell**
+> ("difficult to close" — cosmetic, not functional); acceptable on an
+> unsealed bench unit. **B0 passes on Tier 1 alone**; Tiers 2–3 are staged
+> insurance. If even Tier 3 can't recover, regress to Option A.
 
 ### B1 — Secure bootloader builds + binary is valid
 **Covers:** BOOT001 build; ADR-022 artifact.
@@ -252,3 +284,4 @@ proves the work was reversible, B4 proves the bootloader actually enforces.
 | 0.1 | 2026-06-05 | Initial draft. Engineering bring-up gate for the secure bootloader (B0–B7), the unit/brick-risk decision (recovery-first), and the Phase 0 pre-reqs. Surfaces the BOOT005 DFU-refuse implementation gap (BP2). |
 | 0.2 | 2026-06-06 | **Unit decision ratified: Option B** (single Tier-1 unit + pre-staged SWD recovery). Sign-off + BP4 rows updated; stale BP2/B5 BOOT005 sign-off rows reconciled with [ADR-024](ARCHITECTURE.md) (deferred, not gating). **BP1 + B1 closed off-hardware** (artifact size/vector-table valid, embedded SPKI DER == manufacturer pubkey). Remaining B0/B2/B3/B4/B6/B7 are hardware-only — blocked on BP4 (procure SWD probe + Cube DEBUG cable), then B0 recovery rehearsal (hard gate). |
 | 0.3 | 2026-06-06 | **BP4 kit ordered** — ST-Link V2 (+ STM32CubeProgrammer) + 6-pin JST SUR 0.8 mm pigtail (`06SUR-32S`/`SSHL-002T-P0.2`). **Connector correction:** standard carrier board does **not** break out SWD; SWD access is the Cube's **internal** FMU SWD connector (`SM06B-SURS-TF`, JST SUR 0.8 mm) — open the case (bring-up unit is unsealed). B0 step 1 + BP4 rows updated accordingly. Awaiting delivery → then B0. |
+| 0.4 | 2026-06-06 | **B0 SWD-connect procedure researched + recorded** (tiered: Tier 1 plain attach / Tier 2 connect-under-reset via NRST @ DF17 pin 7 / Tier 3 BOOT0→ROM USB DFU). Findings: SWD recovery of Cube Orange is proven (forum: ST-Link V2 + OpenOCD via `SM06B`), NRST is *optional* for a healthy/early-boot unlocked chip but the "No STM32 target found" fix is connect-under-reset which **needs NRST (DF17 pin 7, internal — not on the SUR connector)**; BOOT0 is internal/undocumented (nuclear). Opening the Cube risks the bottom plastic shell (cosmetic). **Gap surfaced:** ordered kit covers Tier 1 only; NRST tap not yet staged. Option B remains viable; B0 (Tier 1) is the proof gate. |
