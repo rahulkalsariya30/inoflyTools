@@ -1,6 +1,6 @@
 # Secure Bootloader Bring-Up Gate (Phase 5b) — Engineering Acceptance
 
-**Document version:** 0.1 (draft, 2026-06-05)
+**Document version:** 0.2 (draft, 2026-06-06)
 **Scope:** First-ever proof, on real CubeOrange+ silicon, that the
 **secure bootloader** (BOOT001 verify, installed via BOOT006 `bl_update`)
 builds, installs, enforces signatures, and hands off to the app fw — **and**
@@ -91,7 +91,7 @@ confirmed met* — that is the point of listing them.
 | BP1 | **BOOT001 verify is built into the bootloader.** TOC + `STUB_KEYSTORE` + `PUBLIC_KEY0` (manufacturer pubkey DER) + `sw_crypto`, per `boards/cubepilot/cubeorangeplus/bootloader.px4board`. | Build `cubeorangeplus_bootloader`; confirm the artifact links and the embedded key matches `pki/manufacturer/public/`. Artifact exists today (103,432 B, ≤128 KB sector 0). | ✅ likely (built; re-confirm key) |
 | BP2 | ~~**BOOT005 DFU-refuse is built in.**~~ ⚠️ **NOT a Phase 5b pre-req as of [ADR-024](ARCHITECTURE.md) (2026-06-05).** BOOT005 is **deferred into ADR-023** and reclassified to defense-in-depth (USB is behind the tamper seal → the seal, not BOOT005, closes Path A). It is **not implemented** (`stm32_common/main.c` still enters the stock `bootloader(timeout)` upload loop; only BOOT001 TOC-verify is wired) and **must not be built standalone** — it cannot be switched on until ADR-023's app-fw self-reflash exists, else a healthy unit becomes un-updatable over USB. Build it **with ADR-023**, flag `CONFIG_BOOTLOADER_REFUSE_DFU` default OFF. | ➖ **deferred to ADR-023 — not gating Phase 5b** |
 | BP3 | **Signed app fw already on the unit**, manufacturer-signed (same key as the bootloader's embedded pubkey). | The Tier-1 build is signed and flashed; confirm `ver all` matches the current signed release. | ✅ (Tier 1) |
-| BP4 | **Recovery toolchain staged** (Option B) or **spare unit ready** (Option A). | Probe + Cube DEBUG cable on hand; known-good factory sector-0 image captured (MANUFACTURING_RUNBOOK Step 2 reference hash / dump). | ⬜ decision-gated |
+| BP4 | **Recovery toolchain staged** (Option B — chosen 2026-06-06). | Probe (ST-Link V3 / J-Link) + Cube 6-pin DEBUG cable on hand; known-good factory sector-0 image captured (MANUFACTURING_RUNBOOK Step 2 reference hash / dump — captured in B0 step 2). | ⬜ **procurement-gated** (probe + cable to acquire) |
 | BP5 | **App-fw Tier 1 green on the build under test** (H0–H15, H8 carried). | [HARDWARE_ACCEPTANCE.md sign-off](HARDWARE_ACCEPTANCE.md). | ✅ |
 | BP6 | **Known-good app fw `.px4` on hand** to recover the *app-fw* side of B4's negative test. | The signed release `.px4` in `release/`. | ✅ |
 
@@ -227,16 +227,16 @@ proves the work was reversible, B4 proves the bootloader actually enforces.
 
 | Step | Result | Date | Notes (commit hashes, board UID, probe used) |
 |---|---|---|---|
-| Unit decision (A / B) | ⬜ | | |
-| BP1 BOOT001 built | ⬜ | | |
-| BP2 BOOT005 built | ⬜ | | **gap — verify/implement first** |
-| BP4 recovery staged | ⬜ | | probe + cable + known-good image |
+| Unit decision (A / B) | ✅ **B** | 2026-06-06 | Single Tier-1 unit + pre-staged SWD recovery. B0 is the hard gate; BP4 must be staged before B2. |
+| BP1 BOOT001 built | ⬜ | | re-confirm embedded `PUBLIC_KEY0` == `pki/manufacturer/public/` |
+| BP2 BOOT005 built | ➖ **deferred** | 2026-06-06 | **Not a Phase 5b pre-req** — [ADR-024](ARCHITECTURE.md): BOOT005 reclassified to defense-in-depth, deferred into ADR-023. |
+| BP4 recovery staged | ⬜ | | **Option B blocker** — SWD probe (ST-Link V3 / J-Link) + Cube 6-pin DEBUG cable + known-good sector-0 image |
 | B0 recovery rehearsal | ⬜ | | **hard gate before B2** |
 | B1 build valid | ⬜ | | |
 | B2 install (BOOT006) | ⬜ | | |
 | B3 BOOT001 positive | ⬜ | | |
 | B4 BOOT001 negative | ⬜ | | release-blocking if it boots |
-| B5 BOOT005 DFU-refuse | ⬜ | | contingent on BP2 |
+| B5 BOOT005 DFU-refuse | ➖ **deferred** | 2026-06-06 | Moved to ADR-023 work package ([ADR-024](ARCHITECTURE.md)); not required for Phase 5b sign-off. |
 | B6 idempotent re-install | ⬜ | | |
 | B7 SWD-open (pre-seal) | ⬜ | | expected; seal closes in production |
 
@@ -247,3 +247,4 @@ proves the work was reversible, B4 proves the bootloader actually enforces.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-06-05 | Initial draft. Engineering bring-up gate for the secure bootloader (B0–B7), the unit/brick-risk decision (recovery-first), and the Phase 0 pre-reqs. Surfaces the BOOT005 DFU-refuse implementation gap (BP2). |
+| 0.2 | 2026-06-06 | **Unit decision ratified: Option B** (single Tier-1 unit + pre-staged SWD recovery). Sign-off + BP4 rows updated; stale BP2/B5 BOOT005 sign-off rows reconciled with [ADR-024](ARCHITECTURE.md) (deferred, not gating). Next: procure SWD probe + Cube DEBUG cable, then run B0 recovery rehearsal (hard gate). |
