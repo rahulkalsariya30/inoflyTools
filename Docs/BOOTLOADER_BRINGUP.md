@@ -228,11 +228,11 @@ proves the work was reversible, B4 proves the bootloader actually enforces.
 | Step | Result | Date | Notes (commit hashes, board UID, probe used) |
 |---|---|---|---|
 | Unit decision (A / B) | ✅ **B** | 2026-06-06 | Single Tier-1 unit + pre-staged SWD recovery. B0 is the hard gate; BP4 must be staged before B2. |
-| BP1 BOOT001 built | ⬜ | | re-confirm embedded `PUBLIC_KEY0` == `pki/manufacturer/public/` |
+| BP1 BOOT001 built | ✅ | 2026-06-06 | Off-hw re-confirm: embedded SPKI DER == `manufacturer_public.pem` (full 294-B DER @ `0x17853`, 256-B modulus @ `0x17874`) in `bootloader_artifact/cubepilot_cubeorangeplus_bootloader.bin`. |
 | BP2 BOOT005 built | ➖ **deferred** | 2026-06-06 | **Not a Phase 5b pre-req** — [ADR-024](ARCHITECTURE.md): BOOT005 reclassified to defense-in-depth, deferred into ADR-023. |
 | BP4 recovery staged | ⬜ | | **Option B blocker** — SWD probe (ST-Link V3 / J-Link) + Cube 6-pin DEBUG cable + known-good sector-0 image |
 | B0 recovery rehearsal | ⬜ | | **hard gate before B2** |
-| B1 build valid | ⬜ | | |
+| B1 build valid | ✅ | 2026-06-06 | Off-hw: size 103,432 B ≤ 128 KB; vector table valid (SP `0x24001D0E` AXI SRAM, reset `0x08000305` sector-0 Thumb); embedded key matches (see BP1). Artifact = `bootloader_artifact/...bin`. |
 | B2 install (BOOT006) | ⬜ | | |
 | B3 BOOT001 positive | ⬜ | | |
 | B4 BOOT001 negative | ⬜ | | release-blocking if it boots |
@@ -247,4 +247,4 @@ proves the work was reversible, B4 proves the bootloader actually enforces.
 | Version | Date | Change |
 |---|---|---|
 | 0.1 | 2026-06-05 | Initial draft. Engineering bring-up gate for the secure bootloader (B0–B7), the unit/brick-risk decision (recovery-first), and the Phase 0 pre-reqs. Surfaces the BOOT005 DFU-refuse implementation gap (BP2). |
-| 0.2 | 2026-06-06 | **Unit decision ratified: Option B** (single Tier-1 unit + pre-staged SWD recovery). Sign-off + BP4 rows updated; stale BP2/B5 BOOT005 sign-off rows reconciled with [ADR-024](ARCHITECTURE.md) (deferred, not gating). Next: procure SWD probe + Cube DEBUG cable, then run B0 recovery rehearsal (hard gate). |
+| 0.2 | 2026-06-06 | **Unit decision ratified: Option B** (single Tier-1 unit + pre-staged SWD recovery). Sign-off + BP4 rows updated; stale BP2/B5 BOOT005 sign-off rows reconciled with [ADR-024](ARCHITECTURE.md) (deferred, not gating). **BP1 + B1 closed off-hardware** (artifact size/vector-table valid, embedded SPKI DER == manufacturer pubkey). Remaining B0/B2/B3/B4/B6/B7 are hardware-only — blocked on BP4 (procure SWD probe + Cube DEBUG cable), then B0 recovery rehearsal (hard gate). |
