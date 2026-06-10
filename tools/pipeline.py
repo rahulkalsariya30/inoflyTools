@@ -25,9 +25,11 @@ USAGE (Hardware — CubeOrange+):
   # DeprecationWarning) but cannot reproduce the FC byte ranges.
 """
 
+import base64
 import json
 import shutil
 import sys
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +44,13 @@ from tools.provisioning.export_manifest import (
     export_binary_manifest,
     verify_binary_manifest,
     save_binary_manifest,
+)
+from tools.signer.toc_sign import (
+    sign_image as _sign_boot_region,
+    verify_image as _verify_boot_region,
+    find_toc as _find_image_toc,
+    TocParseError,
+    TOC_OFFSET_DEFAULT,
 )
 
 # Default key paths
@@ -59,6 +68,70 @@ class PipelineResult:
     firmware_path: Path
     binary_manifest_path: Path
     all_verified: bool
+    # True if the BOOT001 image signature was patched into firmware_path; False
+    # for SITL / non-secure images (no image TOC -> nothing for the bootloader
+    # to verify, so signing is correctly skipped).
+    bootloader_image_signed: bool = False
+
+
+def sign_px4_bootloader_image(
+    px4_path: Path,
+    private_key_path: Path,
+    public_key_path: Path,
+    output_path: Path,
+    log=lambda _m: None,
+) -> Path | None:
+    """
+    BOOT001: patch the RSA-PSS *image* signature into a hardware .px4.
+
+    Separate from the manifest signature (SIG001). The verifying bootloader
+    RSA-PSS-verifies the app-fw image against the manufacturer pubkey *before*
+    handing off; that signature lives in the image's `.app_signature` region,
+    located via the image TOC. A normally-built .px4 carries a 256-byte ZERO
+    placeholder there — so without this step the bootloader rejects the image
+    fail-closed and the unit will not boot (this is the gap the 2026-06-09
+    bootloader review found).
+
+    Decompresses the .px4 image, signs the BOOT region (SHA-256 + RSA-PSS
+    saltlen=32 — identical to what the device's libtomcrypt verifier does),
+    re-wraps with the same zlib(level 9)+base64 encoding px_mkfw uses, and
+    writes `output_path`.
+
+    Returns `output_path` on success, or **None** if the image has no TOC —
+    i.e. a SITL or non-secure build. That is NOT an error: such images are
+    never verified by a bootloader, so there is nothing to sign.
+
+    The `.app_signature` region sits after `.compliance_params` in the image,
+    outside both the POST `code_hash` and `data_hash` ranges, so signing here
+    does not change the manifest checksums computed downstream.
+    """
+    desc = json.loads(Path(px4_path).read_text())
+    if "image" not in desc:
+        return None
+
+    image = zlib.decompress(base64.b64decode(desc["image"]))
+
+    # No image TOC => SITL / non-secure build => nothing for the bootloader to
+    # verify. Skip silently (caller logs it); do not treat as an error.
+    try:
+        _find_image_toc(image, TOC_OFFSET_DEFAULT)
+    except TocParseError:
+        return None
+
+    signed = _sign_boot_region(image, Path(private_key_path).read_bytes())
+
+    # Fail-fast: the device bootloader would reject a bad signature, so prove
+    # it verifies here rather than discovering it on the bench.
+    if not _verify_boot_region(signed, Path(public_key_path).read_bytes()):
+        raise RuntimeError("BOOT001 image signature failed its post-sign verify")
+
+    desc["image_size"] = len(signed)
+    desc["image"] = base64.b64encode(zlib.compress(signed, 9)).decode("utf-8")
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(desc, indent=4))
+    return output_path
 
 
 def run_pipeline(
@@ -71,12 +144,15 @@ def run_pipeline(
     data_bin_path: Path = None,
     private_key_path: Path = PRIVATE_KEY,
     public_key_path: Path = PUBLIC_KEY,
+    sign_bootloader_image: bool = True,
     verbose: bool = True,
 ) -> PipelineResult:
     """
     Run the full firmware release pipeline.
 
     Steps:
+      0. BOOT001 — patch the RSA-PSS image signature into the .px4 (hardware
+         secure images only; SITL/non-secure images have no TOC and are skipped)
       1. CHK001 — compute SHA-256 checksums (code + data)
       2. SIG001 — sign manifest with manufacturer key
       3. Verify — confirm signature is valid before proceeding
@@ -120,6 +196,26 @@ def run_pipeline(
     def log(msg: str):
         if verbose:
             print(msg)
+
+    # Step 0: BOOT001 image signature (hardware secure images only).
+    # The verifying bootloader rejects an unsigned image fail-closed, so the
+    # signed .px4 must be the artifact everything downstream (manifest, bundle,
+    # final copy) is built from. SITL / non-secure images have no image TOC and
+    # are passed through untouched. Rebinding px4_path keeps the rest of the
+    # pipeline unchanged.
+    bootloader_image_signed = False
+    if sign_bootloader_image:
+        log(f"[0/7] Signing BOOT001 image (RSA-PSS over app-fw region)...")
+        signed_px4 = sign_px4_bootloader_image(
+            px4_path, private_key_path, public_key_path,
+            output_dir / f"{stem}.px4", log=log,
+        )
+        if signed_px4 is not None:
+            px4_path = signed_px4  # downstream manifest/bundle/copy use the signed image
+            bootloader_image_signed = True
+            log(f"      Signed image written: {signed_px4}")
+        else:
+            log(f"      No image TOC — SITL/non-secure build, skipping (not an error)")
 
     # Step 1: Checksums
     if elf_path:
@@ -200,6 +296,7 @@ def run_pipeline(
     log(f"\n{'='*60}")
     log(f"PIPELINE COMPLETE — all 3 verification gates passed")
     log(f"{'='*60}")
+    log(f"  BOOT001 image:   {'SIGNED (RSA-PSS)' if bootloader_image_signed else 'not signed (no TOC — SITL/non-secure)'}")
     log(f"  Firmware:        {firmware_path}")
     log(f"  Bundle:          {fwbundle_path}")
     log(f"  Binary manifest: {binary_manifest_path}")
@@ -214,6 +311,7 @@ def run_pipeline(
         firmware_path=firmware_path,
         binary_manifest_path=binary_manifest_path,
         all_verified=True,
+        bootloader_image_signed=bootloader_image_signed,
     )
 
 
@@ -237,6 +335,11 @@ if __name__ == "__main__":
                         help="DEPRECATED: pre-extracted .data section binary")
     parser.add_argument("--private-key", default=str(PRIVATE_KEY), help="Manufacturer private key path")
     parser.add_argument("--public-key", default=str(PUBLIC_KEY), help="Manufacturer public key path")
+    parser.add_argument("--no-bootloader-sign", action="store_true",
+                        help="Skip the BOOT001 image signature (step 0). Use for "
+                             "SITL, or when the image is signed out-of-band. "
+                             "Hardware secure images need this signature or the "
+                             "verifying bootloader rejects them fail-closed.")
     args = parser.parse_args()
 
     try:
@@ -250,6 +353,7 @@ if __name__ == "__main__":
             data_bin_path=Path(args.data_bin) if args.data_bin else None,
             private_key_path=Path(args.private_key),
             public_key_path=Path(args.public_key),
+            sign_bootloader_image=not args.no_bootloader_sign,
         )
     except (FileNotFoundError, RuntimeError) as e:
         print(f"\n[FATAL] {e}")

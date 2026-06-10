@@ -109,9 +109,30 @@ Time estimate: ~30 minutes per unit once Pre-flight is settled.
 
 ### Step 3 — Load first signed app fw via QGC
 
+> **The "signed app fw" here is the BOOT001 *image*-signed `.px4`, not a
+> normally-built one.** A stock `make` build carries a 256-byte **zero**
+> signature placeholder in `.app_signature`; the verifying bootloader you
+> install in Step 4 would reject it fail-closed (the unit would not boot the
+> app). The release `.px4` produced by `tools/pipeline.py` is signed —
+> **Step 0** of the pipeline patches the RSA-PSS image signature
+> (`tools/signer/toc_sign.py`) before checksumming/bundling:
+>
+> ```sh
+> python tools/pipeline.py build/.../cubepilot_cubeorangeplus_default.px4 \
+>     --board-id 1063 --elf build/.../cubepilot_cubeorangeplus_default.elf \
+>     --version <ver> --output-dir release/
+> #  -> release/<stem>.px4 is the BOOT001-signed firmware to load below.
+> #     Confirm the run logged: "BOOT001 image: SIGNED (RSA-PSS)".
+> ```
+>
+> Verify offline before flashing: `python tools/signer/toc_sign.py
+> release/<stem>.px4 ...` round-trips, or the pipeline's own step-0
+> post-sign verify must have passed.
+
 - Open QGroundControl on the provisioning host.
-- Use Vehicle Setup → Firmware → Load Custom Firmware to load our
-  **signed app fw release** (the same .fwbundle / .px4 we ship).
+- Use Vehicle Setup → Firmware → Load Custom Firmware to load the
+  **pipeline-produced signed app fw release** (`release/<stem>.px4`, or the
+  `.fwbundle` wrapping it).
 - The factory bootloader accepts the load (it does not verify
   signatures — but the binary we are loading is still the
   manufacturer-signed app fw, so the trust handover begins here).
