@@ -1,6 +1,6 @@
 # Secure Bootloader Bring-Up Gate (Phase 5b) — Engineering Acceptance
 
-**Document version:** 0.5 (draft, 2026-06-06)
+**Document version:** 0.6 (draft, 2026-06-09)
 **Scope:** First-ever proof, on real CubeOrange+ silicon, that the
 **secure bootloader** (BOOT001 verify, installed via BOOT006 `bl_update`)
 builds, installs, enforces signatures, and hands off to the app fw — **and**
@@ -134,6 +134,17 @@ spare, but rehearsing SWD reflash is still recommended.**
    the Cube via USB-C; VREF = 3.3 V, **never pin 1 (5 V)**. The 0.8 mm SUR
    mating cable is near-unobtainable — solder fine wires or use pogo-pins to
    pins 4/5/6 instead.
+   **Confirmed wiring for our in-hand ST-Link V2 (black clone) — read off the
+   actual unit (⚠️ clone pinouts vary; wire by SIGNAL LABEL, not pin number):**
+   ST-Link `1=RST 2=SWCLK 3=SWIM 4=SWDIO 5=GND 6=GND 7/8=3.3V 9/10=5.0V`, so:
+   - ST-Link **pin 4 (SWDIO)** → carrier FMU **pin 4 (FMU_SWDIO)**
+   - ST-Link **pin 2 (SWCLK)** → carrier FMU **pin 5 (FMU_SWCLK)**
+   - ST-Link **pin 6 (GND)** → carrier FMU **pin 6 (GND)**
+
+   RST/SWIM/3.3V/5.0V left unconnected; Cube powered over USB-C; carrier FMU
+   pins 1/2/3 (5V/TX/RX) = NC. Build = **solder-direct 32 AWG** to the carrier
+   FMU pads (simplest for a one-time rehearsal); `06SUR-32S` IDC housing is the
+   removable alternative. Hot-glue strain relief — 32 AWG is fragile.
 2. Dump sector 0 (128 KB @ `0x08000000`) and save it as the **known-good
    image** + record its SHA-256 (this is also MANUFACTURING_RUNBOOK Step 2's
    factory reference hash — capture it here).
@@ -270,7 +281,7 @@ proves the work was reversible, B4 proves the bootloader actually enforces.
 
 | Step | Result | Date | Notes (commit hashes, board UID, probe used) |
 |---|---|---|---|
-| Unit decision (A / B) | ✅ **B** | 2026-06-06 | Single Tier-1 unit + pre-staged SWD recovery. B0 is the hard gate; BP4 must be staged before B2. |
+| Unit decision (A / B) | ✅ **B** (re-ratified) | 2026-06-09 | Single Tier-1 unit + pre-staged SWD recovery. **Re-ratified 2026-06-09 after an explicit B2 brick-probability assessment** (residual brick risk = *low*, dominated by power-loss during the ~5–10 s `bl_update` window; binary-corruption and `bl_update`-bug triggers retired by B1 pass + header-validate-before-erase). Mitigation: run B2 on rock-stable wall power. B0 is the hard gate; BP4 must be staged before B2. Decision is now **settled — stop deferring.** |
 | BP1 BOOT001 built | ✅ | 2026-06-06 | Off-hw re-confirm: embedded SPKI DER == `manufacturer_public.pem` (full 294-B DER @ `0x17853`, 256-B modulus @ `0x17874`) in `bootloader_artifact/cubepilot_cubeorangeplus_bootloader.bin`. |
 | BP2 BOOT005 built | ➖ **deferred** | 2026-06-06 | **Not a Phase 5b pre-req** — [ADR-024](ARCHITECTURE.md): BOOT005 reclassified to defense-in-depth, deferred into ADR-023. |
 | BP4 recovery staged | 🟡 ordered | 2026-06-06 | ST-Link V2 (+ STM32CubeProgrammer). SWD = **FMU connector on carrier underside** (`SM06B-SURS-TF`, SUR 0.8 mm; **no Cube-opening** — forum-confirmed). 0.8 mm cable near-unobtainable → solder/pogo to pins 4/5/6 (SWDIO/SWCLK/GND). Awaiting probe. |
@@ -294,3 +305,4 @@ proves the work was reversible, B4 proves the bootloader actually enforces.
 | 0.3 | 2026-06-06 | **BP4 kit ordered** — ST-Link V2 (+ STM32CubeProgrammer) + 6-pin JST SUR 0.8 mm pigtail (`06SUR-32S`/`SSHL-002T-P0.2`). **Connector correction:** standard carrier board does **not** break out SWD; SWD access is the Cube's **internal** FMU SWD connector (`SM06B-SURS-TF`, JST SUR 0.8 mm) — open the case (bring-up unit is unsealed). B0 step 1 + BP4 rows updated accordingly. Awaiting delivery → then B0. |
 | 0.4 | 2026-06-06 | **B0 SWD-connect procedure researched + recorded** (tiered: Tier 1 plain attach / Tier 2 connect-under-reset via NRST @ DF17 pin 7 / Tier 3 BOOT0→ROM USB DFU). Findings: SWD recovery of Cube Orange is proven (forum: ST-Link V2 + OpenOCD via `SM06B`), NRST is *optional* for a healthy/early-boot unlocked chip but the "No STM32 target found" fix is connect-under-reset which **needs NRST (DF17 pin 7, internal — not on the SUR connector)**; BOOT0 is internal/undocumented (nuclear). **Gap surfaced:** ordered kit covers Tier 1 only; NRST tap not yet staged. Option B remains viable; B0 (Tier 1) is the proof gate. |
 | 0.5 | 2026-06-06 | **SWD location corrected — it's on the carrier, NOT inside the Cube.** Authoritative source: CubePilot forum (S. Purohit, Feb 2024, annotated photo + pinout): the **FMU & I/O SWD+DEBUG connectors are on the *underside* of the carrier board** (`SM06B-SURS-TF`, SUR 0.8 mm), accessible once the carrier is out of the plastic case — **no Cube-aluminium-shell opening needed.** The board's `P105`/`P106` (SERIAL-5 silkscreen nearby) are these debug connectors — SERIAL 5 (pins 2-3) is co-located with SWDIO/SWCLK (pins 4-5) on the FMU debug connector. Reconciles the ADS-B "Debug USB removed" note (that was the USB console/Edison, not these SWD SUR connectors). B0 step 1 + BP4 rows corrected. Removes the case-opening damage risk; Option B materially de-risked. |
+| 0.6 | 2026-06-09 | **Option B re-ratified after a B2 brick-probability assessment** (residual brick risk *low*, dominated by power-loss during the ~5–10 s `bl_update` window; corruption/`bl_update`-bug triggers retired by B1 pass + header-validate-before-erase; mitigation = rock-stable wall power for B2). Decision is now settled — the long-running A/B deferral is closed. **Confirmed wiring for the in-hand ST-Link V2 (black clone)** folded into B0 step 1: ST-Link `pin4(SWDIO)/pin2(SWCLK)/pin6(GND)` → carrier FMU `pin4/pin5/pin6` (clone pinout differs from the green forum unit — wire by signal label). Solder-direct 32 AWG build. Sign-off + history updated. |
