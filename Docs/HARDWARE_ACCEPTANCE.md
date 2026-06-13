@@ -677,7 +677,10 @@ Where SITL says `pxh>`, hardware uses the `nsh>` / MAVLink Console prompt.
   Then in QGC: Vehicle Setup → Firmware → Load Custom Firmware → select
   the freshly built `.px4` / `.apj`.
 - **Pass:** flash completes and the unit reboots; at the console
-  `secure_boot status` resolves (module present). FLASH usage within
+  `secure_boot audit_status` resolves (module present — note there is no
+  `status` subcommand; valid ones are `start`/`verify_update`/`clear_update`/
+  `audit_status`/`param_status`, and `listener firmware_integrity_status`
+  shows the POST result). FLASH usage within
   budget (build did not overflow under `bl_update`-enabled config — keep
   `bl_update` ON; manage size by stripping modules, never by disabling
   it).

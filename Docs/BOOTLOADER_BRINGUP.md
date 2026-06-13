@@ -215,11 +215,11 @@ passed through untouched. Covered by `tests/compliance/test_PIPE_pipeline.py`
 
 ```sh
 # Canonical: produce a BOOT001-signed release .px4 (WSL build → host pipeline)
-cd ~/PX4-Autopilot && make cubepilot_cubeorangeplus_inofly
+cd ~/PX4-Autopilot && make cubepilot_cubeorangeplus_default
 cd /mnt/d/Projects/Drone && python3 tools/pipeline.py \
-  ~/PX4-Autopilot/build/cubepilot_cubeorangeplus_inofly/cubepilot_cubeorangeplus_inofly.px4 \
+  ~/PX4-Autopilot/build/cubepilot_cubeorangeplus_default/cubepilot_cubeorangeplus_default.px4 \
   --board-id 1063 \
-  --elf ~/PX4-Autopilot/build/cubepilot_cubeorangeplus_inofly/cubepilot_cubeorangeplus_inofly.elf \
+  --elf ~/PX4-Autopilot/build/cubepilot_cubeorangeplus_default/cubepilot_cubeorangeplus_default.elf \
   --version <ver> --output-dir release/
 #  -> release/<stem>.px4 is signed; run log must show "BOOT001 image: SIGNED (RSA-PSS)"
 ```
@@ -323,22 +323,32 @@ into the ADR-023 work package** ([ADR-024](ARCHITECTURE.md)) and is **not**
 required for Phase 5b sign-off. B0 and B4 are the load-bearing evidence: B0
 proves the work was reversible, B4 proves the bootloader actually enforces.
 
+> **Status — 2026-06-13.** Executed on hardware: **B1.5, B2, B3, B4 PASS**
+> (plus extended BOOT001 negatives — wrong-key and unsigned — both rejected
+> fail-closed). The BOOT001 enforcement evidence is complete and release-quality.
+> **B0 WAIVED** — the SWD link never came up on the bench rig (BP4); the
+> reversibility property B0 exists to prove was instead demonstrated via
+> **USB-DFU recovery** (sound because BOOT005 is not installed). **Remaining for
+> full Phase 5b sign-off:** **B6** (idempotent re-install) and a disposition on
+> **B0/B7** — either accept USB-DFU as the recovery path of record and re-scope
+> the SWD rehearsal, or bring the SWD rig up.
+
 | Step | Result | Date | Notes (commit hashes, board UID, probe used) |
 |---|---|---|---|
 | Unit decision (A / B) | ✅ **B** (re-ratified) | 2026-06-09 | Single Tier-1 unit + pre-staged SWD recovery. **Re-ratified 2026-06-09 after an explicit B2 brick-probability assessment** (residual brick risk = *low*, dominated by power-loss during the ~5–10 s `bl_update` window; binary-corruption and `bl_update`-bug triggers retired by B1 pass + header-validate-before-erase). Mitigation: run B2 on rock-stable wall power. B0 is the hard gate; BP4 must be staged before B2. Decision is now **settled — stop deferring.** |
 | BP1 BOOT001 built | ✅ | 2026-06-06 | Off-hw re-confirm: embedded SPKI DER == `manufacturer_public.pem` (full 294-B DER @ `0x17853`, 256-B modulus @ `0x17874`) in `bootloader_artifact/cubepilot_cubeorangeplus_bootloader.bin`. |
 | BP2 BOOT005 built | ➖ **deferred** | 2026-06-06 | **Not a Phase 5b pre-req** — [ADR-024](ARCHITECTURE.md): BOOT005 reclassified to defense-in-depth, deferred into ADR-023. |
-| BP3 signed app fw on unit | 🟡 **tooling done** | 2026-06-09 | **Code-review finding:** app fw shipped **unsigned** (zero SIG placeholder; no build/pipeline signing). ✅ **Fixed in tooling:** `pipeline.py` step 0 now auto-signs the BOOT001 image (tests in `test_PIPE_pipeline.py`). **Remaining:** run pipeline + flash signed `.px4` (B1.5) before B2. |
-| BP4 recovery staged | 🟡 ordered | 2026-06-06 | ST-Link V2 (+ STM32CubeProgrammer). SWD = **FMU connector on carrier underside** (`SM06B-SURS-TF`, SUR 0.8 mm; **no Cube-opening** — forum-confirmed). 0.8 mm cable near-unobtainable → solder/pogo to pins 4/5/6 (SWDIO/SWCLK/GND). Awaiting probe. |
-| B0 recovery rehearsal | ⬜ | | **hard gate before B2** |
+| BP3 signed app fw on unit | ✅ | 2026-06-13 | Signed `.px4` via `pipeline.py` step 0 (BOOT001 image signature), flashed over factory BL; matching `manifest.bin` copied to SD; POST `check_passed=true`, hashes match the pipeline (`b405ef40…`/`f05e43d2…`). |
+| BP4 recovery staged | ⚠️ **rig built, SWD link unestablished** | 2026-06-13 | ST-Link V2 (black clone) soldered direct (32 AWG) to carrier-underside FMU SUR pins 4/5/6 (SWDIO/SWCLK/GND), Cube on USB-C. Probe enumerates ("STM32 STLink"), but STM32CubeProgrammer returns "No STM32 target found / unable to get core ID" at 480 & 100 kHz. Pin-1 orientation / cold-joint / FMU-vs-I/O connector debug **deferred**. **SWD recovery NOT available on this unit** → recovery relied on USB-DFU (valid: BOOT005 not installed). |
+| B0 recovery rehearsal | ⚠️ **WAIVED** | 2026-06-13 | SWD link never established on the bench rig (see BP4). Proceeded under the already-ratified Option-B residual-risk acceptance (low, power-loss-dominated; B2 run on wall power). **Reversibility instead demonstrated via USB-DFU** (the B4/5/6 recoveries) — sound because BOOT005 is not installed, so the bootloader's DFU window stays open on an invalid/absent app. |
 | B1 build valid | ✅ | 2026-06-06 | Off-hw: size 103,432 B ≤ 128 KB; vector table valid (SP `0x24001D0E` AXI SRAM, reset `0x08000305` sector-0 Thumb); embedded key matches (see BP1). Artifact = `bootloader_artifact/...bin`. **2026-06-09:** also confirmed `bl_update` accepts this SP — H7 branch uses `STM_RAM_BASE=STM32_AXISRAM_BASE` (`0x24000000`), so SP `0x24001D0E < 0x24020000` passes the pre-erase header check. |
-| B1.5 sign + load app fw | ⬜ | | **NEW (v0.7).** Sign built `.bin` with `toc_sign.py` → re-wrap via `px_mkfw.py` → flash signed `.px4` over factory BL **before B2**. Host chain validated off-hw 2026-06-09. Prereq for B3. |
-| B2 install (BOOT006) | ⬜ | | |
-| B3 BOOT001 positive | ⬜ | | |
-| B4 BOOT001 negative | ⬜ | | release-blocking if it boots |
+| B1.5 sign + load app fw | ✅ | 2026-06-13 | Built `cubepilot_cubeorangeplus_default` (FLASH 1,871,228 B / 95.18%); `pipeline.py` signed the BOOT001 image (BOOT region `[0x0..0x1c8c7c]`, 256-B sig patched); flashed signed `release/...default.px4` over factory BL; POST green. **(Target corrected `_inofly`→`_default` — see v0.9.)** |
+| B2 install (BOOT006) | ✅ | 2026-06-13 | `bl_update /fs/microsd/...bootloader.bin` clean: image-validate → erase sector 0 → flash → verify → complete (~5–10 s). Artifact 103,432 B, sha256 `7c6f0199…`. Run on wall power. |
+| B3 BOOT001 positive | ✅ | 2026-06-13 | Reboot: secure bootloader RSA-PSS-verified the signed app and handed off; InoflyGCS reconnected; POST `check_passed=true, failure_reason=0`, hashes `b405ef40…`/`f05e43d2…`. |
+| B4 BOOT001 negative | ✅ | 2026-06-13 | Tampered app (1 code byte @ bin `0x10000`, inside BOOT region) **rejected fail-closed** (InoflyGCS Disconnected / SEC N/A, no heartbeat). **Extended negatives:** wrong-key (attacker RSA-2048, structurally valid sig) and unsigned (zero placeholder) — **both rejected identically**. Recovered clean via USB-DFU each time. Fixtures pre-validated offline (manufacturer-verify=FAIL) then deleted from `release/`. |
 | B5 BOOT005 DFU-refuse | ➖ **deferred** | 2026-06-06 | Moved to ADR-023 work package ([ADR-024](ARCHITECTURE.md)); not required for Phase 5b sign-off. |
-| B6 idempotent re-install | ⬜ | | |
-| B7 SWD-open (pre-seal) | ⬜ | | expected; seal closes in production |
+| B6 idempotent re-install | ⬜ | | **remaining** — re-run `bl_update` with the same binary; expect idempotent clean reboot. |
+| B7 SWD-open (pre-seal) | ⚠️ **n/a — SWD not established** | 2026-06-13 | SWD could not be brought up on this rig (see B0/BP4), so the pre-seal SWD path was not confirmed. **De-facto recovery path on this unit = USB-DFU, not SWD.** BOOT007 tamper seal still closes both USB and SWD in production. |
 
 ---
 
@@ -354,3 +364,4 @@ proves the work was reversible, B4 proves the bootloader actually enforces.
 | 0.8 | 2026-06-09 | **Closed the v0.7 finding's tooling gap: BOOT001 image signing is now automated in `tools/pipeline.py` (step 0).** The release pipeline patches the RSA-PSS image signature before checksum/bundle, so `release/<stem>.px4` is signed; SITL/non-secure images (no TOC) pass through untouched; `--no-bootloader-sign` opts out. Added `tests/compliance/test_PIPE_pipeline.py::TestBoot001PipelineSigning` (4 tests; full suite 351 green). B1.5 rewritten to use the pipeline; BP3 → 🟡 (tooling done, must run + flash before B2). MANUFACTURING_RUNBOOK Step 3 corrected to flash the pipeline-produced signed `.px4`. |
 | 0.7 | 2026-06-09 | **Pre-bench code review of the bootloader crypto path + flash chain.** Verified correct: RSA-PSS wiring (SHA-256/MGF1-SHA256/salt 32) matches `toc_sign.py` exactly; embedded 294-B RSA-2048 **SPKI** DER imports via libtomcrypt `rsa_import` (SPKI path) from keystore slot 0; TOC placement (`magic@0x2A8`, BOOT `flags=0x5`, SIG1 follows); fail-closed boot flow; `bl_update` accepts our bootloader (SP in AXI SRAM passes the H7 `STM_RAM_BASE` check, 103 KB < 128 KB sector) and header-validates before erase. **🔴 Critical finding → new step B1.5:** the app fw is shipped **unsigned** (256-byte zero placeholder; no build/`pipeline.py` `toc_sign.py` step) — flashing it under the secure bootloader would fail B3 fail-closed (looks like a brick). Corrected BP3 (was falsely ✅). Host signing chain validated off-hardware end-to-end (sign→post-verify pass on the real 1.83 MB build; signature survives `px_mkfw.py` `.px4` wrap, board_id 1063). |
 | 0.6 | 2026-06-09 | **Option B re-ratified after a B2 brick-probability assessment** (residual brick risk *low*, dominated by power-loss during the ~5–10 s `bl_update` window; corruption/`bl_update`-bug triggers retired by B1 pass + header-validate-before-erase; mitigation = rock-stable wall power for B2). Decision is now settled — the long-running A/B deferral is closed. **Confirmed wiring for the in-hand ST-Link V2 (black clone)** folded into B0 step 1: ST-Link `pin4(SWDIO)/pin2(SWCLK)/pin6(GND)` → carrier FMU `pin4/pin5/pin6` (clone pinout differs from the green forum unit — wire by signal label). Solder-direct 32 AWG build. Sign-off + history updated. |
+| 0.9 | 2026-06-13 | **Gate executed on hardware — B1.5–B4 + extended negatives PASS; B0 waived.** B1.5 (signed app flashed, POST `check_passed=true`, hashes match pipeline) → B2 (`bl_update` from SD clean) → B3 (secure BL RSA-PSS-verified + handed off, POST green) → B4 (tampered app rejected fail-closed) → **extended negatives** (wrong-key attacker RSA-2048, and unsigned zero-placeholder — both rejected identically) → recovery (good `.px4` over USB-DFU, POST green). **B0 WAIVED:** SWD link never established on the bench rig (ST-Link enumerates; CubeProgrammer "No STM32 target found"); proceeded under the ratified Option-B risk acceptance on wall power; recovery proven via USB-DFU instead (valid — BOOT005 not installed). **Target-name fix:** B1.5 block corrected `_inofly`→`_default` (the `inofly.px4board` is stale and lacks `CONFIG_MODULES_SECURE_BOOT` — building it would ship an app with no POST module). Bench fixtures deleted from `release/`. **Remaining:** B6 (idempotent re-install); B0/B7 SWD disposition; `param_status` cosmetic label (`ADR-019`→`ADR-020`, LOCKED-at-0 shows `UNSET`) on next reflash. |
