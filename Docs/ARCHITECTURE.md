@@ -1626,9 +1626,16 @@ install path, not optional bloat.
   **stripping unused PX4 modules** (using the categorized strip list
   in project memory: `fw_*`, `vtol_*`, `rover_*`, `airship_*`, etc.),
   **not** by disabling bl_update.
-- A separate `cubeorangeplus_inofly.px4board` may be created to hold
+- ~~A separate `cubeorangeplus_inofly.px4board` may be created to hold
   the strip list (rather than modifying default), if upstream-fork
-  hygiene matters.
+  hygiene matters.~~ ⚠️ **UPDATED 2026-06-30:** we did **not** take this
+  route. The secure config (`CONFIG_MODULES_SECURE_BOOT=y` + strip list)
+  lives directly in `cubeorangeplus_default.px4board`, so the **secure
+  target is `cubepilot_cubeorangeplus_default`**. A stale `inofly.px4board`
+  did exist (last touched 2026-05-06, `2a0fe19fe3`) but **lacked**
+  `CONFIG_MODULES_SECURE_BOOT` — a landmine (secure-by-name, insecure in
+  fact: building `_inofly` shipped an app with no POST module). It was
+  **deleted 2026-06-30**. Build the secure app fw as `_default`, never `_inofly`.
 
 **Rationale:** matches ArduPilot's production pattern and is the only
 install path that closes the supply-chain trust window without
