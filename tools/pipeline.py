@@ -134,6 +134,70 @@ def sign_px4_bootloader_image(
     return output_path
 
 
+# The secure bootloader lives in flash sector 0, so its .bin is loaded at the
+# flash base (unlike the app image at APP_LOAD_ADDRESS 0x08020000).
+BOOTLOADER_LOAD_ADDRESS = 0x08000000
+
+
+def sign_bootloader_image(
+    bin_path: Path,
+    private_key_path: Path,
+    public_key_path: Path,
+    output_path: Path,
+    log=lambda _m: None,
+) -> Path:
+    """
+    BOOT008 (T11-H): sign the secure bootloader .bin in place via its image TOC.
+
+    B-1 made the bootloader an embedded-TOC signed artifact (bl_toc.c) that
+    mirrors the app image: a BOOT region (signed code) plus a 256-byte SIG1
+    placeholder. This patches the RSA-PSS signature over the BOOT region into
+    that placeholder so the on-device `bl_update` gate (B-3) can verify the
+    candidate bootloader *before erasing sector 0* and refuse an unsigned or
+    tampered one.
+
+    Unlike `sign_px4_bootloader_image` (which unwraps/rewraps a zlib+base64
+    .px4), the bootloader artifact is a raw `arm-none-eabi-objcopy -O binary`
+    image whose byte 0 == flash 0x08000000. Same RSA-PSS / SHA-256 / saltlen=32
+    dance, same TOC offset (0x2a8); only the load address differs.
+
+    Raises RuntimeError if the .bin has no TOC — that means a pre-BOOT008
+    bootloader was passed (the old artifact predates bl_toc.c). Rebuild the
+    bootloader target first; do NOT try to sign the stale artifact in place.
+    """
+    bin_data = Path(bin_path).read_bytes()
+
+    try:
+        _find_image_toc(bin_data, TOC_OFFSET_DEFAULT)
+    except TocParseError as e:
+        raise RuntimeError(
+            f"bootloader .bin has no image TOC at {TOC_OFFSET_DEFAULT:#x} — it predates "
+            f"BOOT008 B-1. Rebuild `cubepilot_cubeorangeplus_bootloader` (which now "
+            f"compiles bl_toc.c) and sign the fresh .bin, not the stale artifact. ({e})"
+        )
+
+    signed = _sign_boot_region(
+        bin_data,
+        Path(private_key_path).read_bytes(),
+        app_load_address=BOOTLOADER_LOAD_ADDRESS,
+    )
+
+    # Fail-fast: on-device bl_update would refuse a bad signature, so prove it
+    # verifies here rather than discovering it on the bench (recover = re-sign).
+    if not _verify_boot_region(
+        signed,
+        Path(public_key_path).read_bytes(),
+        app_load_address=BOOTLOADER_LOAD_ADDRESS,
+    ):
+        raise RuntimeError("BOOT008 bootloader signature failed its post-sign verify")
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(signed)
+    log(f"  BOOT008 bootloader image: SIGNED (RSA-PSS) -> {output_path.name}")
+    return output_path
+
+
 def run_pipeline(
     px4_path: Path,
     output_dir: Path,
