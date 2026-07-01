@@ -284,19 +284,33 @@ class TestPOST001FirmwareSource:
         assert "crc32" in content
 
     def test_POST001_checker_has_verify_signature(self):
-        """FirmwareIntegrityChecker must implement RSA-PSS verification."""
+        """FirmwareIntegrityChecker must verify the manifest RSA-PSS signature.
+
+        BOOT008 (ADR-025) factored the RSA-PSS primitive into the shared
+        src/lib/secure_verify lib so bl_update and secure_boot share one
+        implementation. The checker now DELEGATES to secure_verify_pss; the
+        primitive itself lives in secure_verify.cpp.
+        """
         content = wsl_read_file(
             "~/PX4-Autopilot/src/modules/secure_boot/FirmwareIntegrityChecker.cpp"
         )
         if content is None:
             pytest.skip("WSL/PX4 not available")
         assert "verifySignature" in content
+        # Delegates to the shared verify lib (BOOT008 refactor).
+        assert "secure_verify_pss" in content
+
+        verify_lib = wsl_read_file(
+            "~/PX4-Autopilot/src/lib/secure_verify/secure_verify.cpp"
+        )
+        if verify_lib is None:
+            pytest.skip("WSL/PX4 not available")
         # POSIX uses OpenSSL RSA_PKCS1_PSS_PADDING; NuttX uses libtomcrypt
         # rsa_verify_hash_ex with LTC_PKCS_1_PSS. Either is acceptable.
         assert (
-            "RSA_PKCS1_PSS_PADDING" in content
-            or "LTC_PKCS_1_PSS" in content
-            or "rsa_verify_hash_ex" in content
+            "RSA_PKCS1_PSS_PADDING" in verify_lib
+            or "LTC_PKCS_1_PSS" in verify_lib
+            or "rsa_verify_hash_ex" in verify_lib
         )
 
     def test_POST001_checker_uses_openssl_for_sitl(self):
