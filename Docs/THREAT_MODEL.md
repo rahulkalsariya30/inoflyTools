@@ -1,7 +1,7 @@
 # Threat Model — Inofly UAS Firmware Security
 
-**Document version:** 1.2
-**Date:** 2026-05-04 (amended)
+**Document version:** 1.3
+**Date:** 2026-06-30 (amended)
 **Scope:** DGCA Level 1 Type Certification — Firmware Manufacturer
 **Framework:** Adapted from STRIDE for embedded UAS systems
 
@@ -35,6 +35,28 @@
 > future airframe that exposes USB *outside* the seal. The residual-risk
 > ratings ("Low on sealed production units") are unchanged because they already
 > rest on the seal, not on BOOT005.
+
+**Changes since 1.2 (2026-06-13 → 2026-06-30):**
+- **T11 / T12' `bl_update` claim corrected (2026-06-13, hardware finding):**
+  `bl_update` performs **no signature check** on the bootloader image
+  (`bl_update.cpp:167`, vector-table sanity only), and ADR-022 moved the
+  bootloader out of the signed app-fw ROMFS to a loose SD file — so the old
+  "requires the manufacturer's private key (→ T3)" claim was retired. The
+  bootloader-replacement path is closed by **access control** (only a signed app
+  fw runs → attacker code can't self-invoke `bl_update`; remote blocked by
+  MAVLink signing, local USB behind the BOOT007 seal), **not** by a signature on
+  the bootloader. Risk Summary T11 row + T11/T12' Mitigations updated.
+- **T11 / T12' Likelihood cells tightened (2026-06-30):** removed the residual
+  "`bl_update` requires a signed app fw (BOOT006)" phrasing that could be misread
+  as "`bl_update` verifies the bootloader," making the whole table tell one story
+  with the corrected Mitigations cells.
+- **T11-H added (2026-06-13):** optional future hardening — cryptographically
+  signed bootloader updates (sign the bootloader binary + verify before erasing
+  sector 0 → tamper-evident becomes tamper-resistant). Not required for L1;
+  aligns with the approved BOOT008 / Workstream B roadmap.
+- **T14 added (2026-06-13):** firmware rollback / downgrade — accepted by-design
+  residual (BOOT001 verifies authenticity, not freshness; no version counter).
+  Future BOOT00x if wanted, pairs with T11-H.
 
 **Changes since 1.1 (2026-05-04):**
 - Section 6 boundaries: explicit physical-attacker-out-of-scope
@@ -208,7 +230,7 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 |-------|-------|
 | **Attack** | Attacker uses DFU or SWD to overwrite our bootloader with one that returns "signature OK" without actually verifying. The replaced bootloader then launches arbitrary firmware. ⚠️ **AMENDED 2026-05-04 (ADR-013/015):** under the bootstrap-trust model, sector 0 is also writable via PX4's `bl_update` mechanism — but `bl_update` runs *inside* a running app fw, and the running app fw is signature-verified by the existing bootloader (BOOT001). ~~So `bl_update` is only weaponizable by an attacker who already holds the manufacturer's RSA-2048 private key (covered by T3).~~ ⚠️ **CORRECTED 2026-06-13 (hardware finding).** `bl_update` does **no signature check** on the bootloader image — verified in `bl_update.cpp:167`, the only validation is a vector-table sanity check (SP in RAM, reset vector inside the BL flash region; the "verify" pass is a flash read-back, not crypto). And **ADR-022 (2026-05-24) moved the bootloader out of the signed app-fw ROMFS to a loose SD file**, so the app-fw signature no longer transitively covers it. **No private key is required to flash a substitute bootloader once `bl_update` is reachable.** The real gate on this path is **access control to the `bl_update` command**: only a manufacturer-signed app fw runs (BOOT001), so attacker *code* can't self-invoke it; a *human* invoking it needs console access — **remote is blocked by MAVLink signing (PAIR001); local USB is behind the BOOT007 tamper seal.** The end property still holds on *sealed* units, but it rests on BOOT007 + access control, not a private-key gate. See **T11-H** below. |
 | **Impact** | Bypasses the entire chain of trust — every downstream check (firmware sig, manifest sig, POST, ARM gate) is performed by attacker-controlled code. |
-| **Likelihood** | ~~High pre-RDP (DFU and SWD both writable); requires physical port access.~~ ⚠️ **AMENDED 2026-05-04:** ✅ **Low** for the USB-only attacker class — DFU is software-refused (BOOT005); `bl_update` requires a manufacturer-signed app fw (BOOT006). **High** for a physical attacker who reaches SWD/JTAG by breaking the airframe + Cube seal (out of scope at the crypto layer; compensated procedurally — see Section 6 and T11 mitigation row). |
+| **Likelihood** | ~~High pre-RDP (DFU and SWD both writable); requires physical port access.~~ ⚠️ **AMENDED 2026-05-04:** ✅ **Low** for the USB-only attacker class — DFU is software-refused (BOOT005); ~~`bl_update` requires a manufacturer-signed app fw (BOOT006).~~ ⚠️ **CORRECTED 2026-06-13:** `bl_update` is reachable only from a **running signed app fw** (BOOT001 access control) — note it does **not** verify the bootloader image itself (`bl_update.cpp:167`, header sanity only); the closing control is access control + BOOT007, not a signature on the bootloader (see **Mitigations** and **T11-H**). **High** for a physical attacker who reaches SWD/JTAG by breaking the airframe + Cube seal (out of scope at the crypto layer; compensated procedurally — see Section 6 and T11 mitigation row). |
 | **Mitigations** | ~~BOOT003 (RDP Level 2 disables DFU writes AND SWD/JTAG writes at the chip level — no remaining external write path to the bootloader region). The bootloader's trust anchor (manufacturer pubkey) lives in OTP, not in the bootloader binary, so even a copied bootloader cannot substitute its own key.~~ ⚠️ **AMENDED 2026-05-04 (ADR-013/014/015):** ✅ **Three-part compensating control replaces RDP L2:** (a) **BOOT005 software DFU-refuse** — production bootloader actively refuses DFU mode entry, closing the DFU path. (b) ~~**BOOT006 bootstrap-trust** — sector 0 writes via `bl_update` require a manufacturer-signed app fw containing the new bootloader in ROMFS; an attacker without the manufacturer's private key cannot push a malicious bootloader.~~ ⚠️ **CORRECTED 2026-06-13:** post-ADR-022 the bootloader is a *loose SD file* (not ROMFS) and `bl_update` does **not** verify it. BOOT006's real contribution is that **only a signed app fw *runs*** (BOOT001), so attacker code can't self-invoke `bl_update`; the closing control is **BOOT007 (local USB) + MAVLink signing (remote)**, not a private-key gate. See T11-H. (c) **BOOT007 tamper-evident seal** — physical SWD/JTAG access requires visibly breaking the airframe + Cube seal, triggering RMA quarantine on receipt. The bootloader's trust anchor (manufacturer pubkey) is now embedded in the bootloader binary itself; an attacker who could rewrite sector 0 could substitute a key — but every remaining write path is closed by (a)–(c) above. |
 | **Residual risk** | ~~HIGH on dev boards (RDP 0 — accepted, dev-only). NONE on production units after RDP L2 is burned. This is the single strongest argument for why production hardware MUST go through Phase 5b's RDP burn.~~ ⚠️ **AMENDED 2026-05-04:** ✅ **HIGH on dev boards** (no DFU-refuse, no seal — accepted, dev-only segregation as before). **LOW on sealed production units** at the cryptographic layer (DFU dead, `bl_update` requires signed fw, SWD requires breaking seal). The residual *physical-attacker* risk on sealed production units is acknowledged and compensated procedurally (RMA inspection + UID/seal-serial tracking — see Section 6). The single strongest argument for why production manufacturing **must** go through MANUFACTURING_RUNBOOK.md (seal application + UID recording). |
 
@@ -230,7 +252,7 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 |-------|-------|
 | **Attack** | Attacker attempts to substitute the manufacturer pubkey embedded in the bootloader binary with their own pubkey, then signs malicious firmware with the matching private key. The substitution requires writing sector 0 (where the bootloader lives). |
 | **Impact** | Would defeat the entire root of trust — modified bootloader would happily verify attacker-signed firmware. |
-| **Likelihood** | **Low** for the USB-only attacker class — every external write path to sector 0 is closed: DFU is software-refused (BOOT005), `bl_update` requires a manufacturer-signed app fw (BOOT006). **High** for a physical attacker who breaks the seal to reach SWD/JTAG (out of scope at the crypto layer — see Section 6). |
+| **Likelihood** | **Low** for the USB-only attacker class — every external write path to sector 0 is gated: DFU is software-refused (BOOT005); ~~`bl_update` requires a manufacturer-signed app fw (BOOT006).~~ ⚠️ **CORRECTED 2026-06-13:** `bl_update` is reachable only from a **running signed app fw** (BOOT001 access control) — it does **not** verify the bootloader image itself (`bl_update.cpp:167`, header sanity only); the closing control is access control + BOOT007, not a signature on the bootloader (see **Mitigations** and **T11-H**). **High** for a physical attacker who breaks the seal to reach SWD/JTAG (out of scope at the crypto layer — see Section 6). |
 | **Mitigations** | **BOOT005 (software DFU-refuse)** + **BOOT006 (bootstrap-trust via `bl_update`)** + **BOOT007 (tamper-evident seal on SWD path)**. Same compensating-control bundle as T11. ~~The `bl_update` path is the only unprivileged route to sector 0, and it is gated by signature verification of the running app fw containing the new bootloader image — an attacker would need the manufacturer's RSA-2048 private key to weaponize it (collapsed into T3).~~ ⚠️ **CORRECTED 2026-06-13 — `bl_update` does not verify the bootloader image (header check only, `bl_update.cpp:167`), and post-ADR-022 the bootloader is a loose SD file outside the signed ROMFS, so no private key is required to flash a substitute. The `bl_update` path is gated by access control (only-signed-app-runs + BOOT007 seal on USB + MAVLink signing on remote), not by a signature on the bootloader. See T11-H.** |
 | **Residual risk** | LOW on sealed production units at the crypto layer. Acknowledged residuals: (a) physical attacker breaking the seal — handled procedurally via RMA inspection + UID/seal-serial tracking (Section 6); (b) chip decap + physical rewriting of internal flash — outside DGCA Level 1 scope, nation-state-actor territory. ⚠️ **Note on hardware-enforced strength:** the original T12 had a hardware-enforced "fails closed" property (write-once OTP fuses). T12' does not — internal flash *can* be erased and rewritten if an attacker reaches sector 0. The end property "the bootloader on a deployed unit is the bootloader the manufacturer intended" is preserved by the seal + bootstrap-trust combination; the crypto-layer guarantee is replaced by an operational guarantee, which is the standard pattern at this hardware tier (and is what ArduPilot ships with). |
 
