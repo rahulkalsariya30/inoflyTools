@@ -2862,6 +2862,82 @@ classification* (load-bearing → defense-in-depth) and *sequencing* (standalone
 
 ---
 
+### ADR-025 — BOOT008: signed bootloader updates (`bl_update` verify-before-erase) (2026-06-30, promotes T11-H; hardens ADR-015/ADR-022)
+
+**Status: IMPLEMENTED in code (B-1…B-3), pending hardware validation (BOOTLOADER_BRINGUP B8). Not a DGCA Level 1 gate — a defense-in-depth hardening that raises the `bl_update` path from tamper-evident to tamper-resistant.**
+
+**Context — the gap.** The 2026-06-13 hardware session found that `bl_update`
+(the only sanctioned sector-0 writer) does **no signature check** on the
+bootloader image: `bl_update.cpp` only sanity-checks the vector table
+(SP-in-RAM, reset-vector-in-flash), then `up_progmem_eraseblock(0)` +
+`up_progmem_write`. Any header-valid binary on SD is flashed to sector 0.
+[ADR-022](#adr-022) had moved the bootloader out of the signed app-fw ROMFS to
+a loose SD file, so the app-fw signature no longer transitively covers it. On a
+deployed unit the bootloader-replacement path (threat-model T11/T12') was closed
+by **access control + the BOOT007 tamper seal**, *not by cryptography*: only a
+signed app fw runs (BOOT001), so attacker code cannot self-invoke `bl_update`;
+a human needs console access (remote blocked by MAVLink signing, local USB
+behind the seal). Sound for Level 1, but a seal-breaking physical attacker with
+console access could still install an unsigned/malicious bootloader. This was
+recorded as hardening option **T11-H** in THREAT_MODEL.md.
+
+**Decision.** Make the bootloader a **manufacturer-signed artifact of the same
+kind as the app image**, and have `bl_update` **verify it before erasing sector
+0**. Signature delivery is an **embedded TOC inside the bootloader binary**
+(mirrors the BOOT001 app-image structure — `IMAGE_MAIN_TOC` + a reserved
+`.signature` region), **not** a detached sidecar. Refuse-before-erase is
+strictly safer than the prior behaviour: a rejected image leaves the running
+bootloader untouched (no new brick path is introduced).
+
+**Mechanism (as built).**
+- **B-1 (device):** new `boards/cubepilot/cubeorangeplus/src/bl_toc.c` gives the
+  bootloader a two-entry TOC (BOOT signed-code region + 256-byte SIG1 region),
+  placed by `bootloader_script.ld` at `BOOT_DELAY_ADDRESS + 8` (bin offset
+  `0x2a8`), mirroring the app's `toc.c` / `script.ld`. +320 B in the 128 KB
+  sector.
+- **B-2 (host):** `tools/pipeline.py::sign_bootloader_image` (+ CLI
+  `tools/signer/sign_bootloader.py`) RSA-PSS-signs the bootloader BOOT region at
+  load address `0x08000000` and patches the signature into SIG1, with a fail-fast
+  post-sign verify. The committed `bootloader_artifact/…bootloader.bin` is now a
+  signed artifact (the pre-TOC bin must be **rebuilt** then signed, not signed in
+  place).
+- **B-3 (device):** a shared `src/lib/secure_verify/` (`secure_verify_pss`,
+  factored verbatim out of `FirmwareIntegrityChecker::verifySignature` — OpenSSL
+  on SITL, libtomcrypt on NuttX, RSA-2048 PSS/SHA-256/saltlen=32) is linked by
+  **both** secure_boot and bl_update. `bl_update` parses the candidate image's
+  TOC, SHA-256s the BOOT region, and verifies against the embedded manufacturer
+  pubkey on the **same in-RAM buffer** it will flash (no TOCTOU); on any failure
+  it `PX4_ERR`s and returns **without erasing**. Gated by kconfig
+  `CONFIG_BL_UPDATE_REQUIRE_SIG` (default **y** on `cubeorangeplus_default`,
+  **n** on generic boards so upstream `bl_update` is unchanged). `bl_update`
+  `STACK_MAIN` was raised 4096 → 20480 for the RSA modexp.
+
+**What changes.** T11-H moves from "accepted residual" to **implemented**: the
+`bl_update` sector-0 path is now closed by **cryptography** (a manufacturer
+signature on the bootloader), not only by the seal + access control. The seal
+(BOOT007) remains the compensating control for the *other* physical paths
+(SWD/JTAG, decap) and as defense-in-depth here.
+
+**What does NOT change.** BOOT001 (verify-before-boot, the actual root of trust),
+bootstrap-trust (ADR-015), the SD-install mechanic (ADR-022), the single keypair
+(ADR-001/016), and the tamper seal (BOOT007) are all unchanged. The bootloader
+remains immutable-post-manufacturing in practice (field change = RMA); BOOT008
+only governs *what `bl_update` will accept* when it is run.
+
+**Residual (still open, by design).** (a) **Signing-process compromise** — a
+compromise of the offline signing process could still produce a validly-signed
+malicious bootloader (same class as the "manufacturer private key compromise"
+residual; §13). (b) **Anti-rollback** — BOOT008 verifies *authenticity*, not
+*freshness*: an older validly-signed bootloader is still accepted (threat-model
+T14, no version counter). Both are future BOOT00x, not Level 1 requirements.
+
+**Relationship to ADR-023.** Independent of, but complementary to, ADR-023
+(auto firmware update): both reuse `secure_verify_pss`. BOOT008 was sequenced
+**first** (per the 2026-06-16 plan) because it is smaller, self-contained, and
+lower-risk (reject never erases).
+
+---
+
 ## 13. Residual risks (acknowledged)
 
 The architecture defends against software-level attacks and
@@ -2875,7 +2951,7 @@ production-grade physical attacks. It does NOT defend against:
 | **Supply chain compromise** (malicious code injected into PX4 source before signing) | Not a software-attack-against-the-device vector; mitigated operationally. | Reproducible builds, code review, controlled build host |
 | ~~**Dev boards (RDP 0)** | RDP L0 dev units have full SWD/JTAG/DFU exposure. We accept this for development; production units have RDP L2 burned. | Operational segregation (dev units never flown in regulated airspace)~~ ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **Dev boards (no seal, dev-build bootloader without DFU-refuse):** dev units have full SWD/JTAG/DFU exposure; production units have software DFU-refuse + tamper-evident seal. Same operational segregation (dev units never flown in regulated airspace). | Same — operational segregation |
 | **Confidentiality of firmware bytes** | Not a Level 1 requirement. ~~RDP L2 provides practical readout protection.~~ ✅ **Tamper-evident seal provides practical readout protection (SWD readout requires visibly breaking the seal, triggering RMA quarantine).** | Add BOOT004 (flash encryption) for productization or Level 2/3 |
-| ✅ **Manufacturer-signed malicious-bootloader push** (new under ADR-013/015) | A compromise of the firmware-signing process *can* be weaponized to push a malicious bootloader via `bl_update`, because sector 0 is no longer WRP-locked. Same risk class as the "Manufacturer private key compromise" row above; not a separate residual unless the signing process is segmented. | HSM-only signing of `bl_update`-bundling app fw releases; release-process review; out-of-band hash comparison of bootloader bytes vs. last release |
+| ✅ **Manufacturer-signed malicious-bootloader push** (new under ADR-013/015; **narrowed by ADR-025**) | ⚠️ **NARROWED 2026-06-30 (ADR-025/BOOT008).** `bl_update` now RSA-PSS-verifies the candidate bootloader before erasing sector 0, so an *unsigned* malicious bootloader is refused — the path is closed by cryptography, not only the seal + access control. What remains is the same class as "Manufacturer private key compromise": a compromise of the offline **signing process** could still produce a validly-signed malicious bootloader. Not a separate residual unless the signing process is segmented. | HSM-only signing of bootloader + `bl_update`-invoking app fw releases; release-process review; out-of-band hash comparison of bootloader bytes vs. last release; (future) anti-rollback version counter (T14) |
 
 These risks are documented for the auditor. They are **acknowledged
 limitations**, not undiscovered gaps.
@@ -2950,6 +3026,7 @@ For project-specific requirement IDs (CHK001, BOOT001, etc.), see
 
 | Version | Date | Change |
 |---|---|---|
+| 1.6 | 2026-06-30 | Added **ADR-025 (BOOT008 — signed bootloader updates / `bl_update` verify-before-erase)**, promoting hardening option T11-H to implemented (code: B-1 bootloader embedded TOC, B-2 host signer, B-3 shared `secure_verify` lib + `bl_update` crypto gate). Narrowed the §13 "manufacturer-signed malicious-bootloader push" residual (unsigned bootloaders now refused by cryptography, not only the seal + access control; residual narrows to signing-process compromise). No change to BOOT001 root of trust, bootstrap-trust (ADR-015), the SD-install mechanic (ADR-022), the single keypair, or the tamper seal. Not a Level 1 gate; pending hardware validation (BOOTLOADER_BRINGUP B8). |
 | 1.0 | 2026-04-29 | Initial lockdown. Captures all architectural decisions made through ADR-012. |
 | 1.1 | 2026-04-29 | Added §5.5 (Why POST and RDP L2 are both needed) and §8.4 (How updates work on a chip locked by RDP L2 — internal-vs-external writes, WRP-locked bootloader region, factory provisioning sequence). No architectural changes; expansions of existing decisions to address common auditor questions. |
 | 1.5 | 2026-06-05 | No new ADR — implementation + transport fixes recorded for traceability. (1) **secure_boot autostart:** `secure_boot start` wired into CubeOrange+ `boards/cubepilot/cubeorangeplus/init/rc.board_extras` and SITL `init.d-posix/rcS`, so the app-firmware POST (POST002/003, ADR-018) and the audit logger (LOG001) run on **every** boot rather than only when started by hand. This realises the "POST on every boot" property already described in §7 / SECURITY_PLAN; previously the app-firmware POST was bench-started manually. A dormant logger was also the root cause of the GCS Install-on-Drone timeout + empty live panel on hardware. PX4 fork `354696551e`; verified on CubeOrange+ and SITL (SIH). (2) **BUG #7 (QGC MAVLink-FTP):** the GCS custom controllers now send **absolute** `/fs/microsd/inofly/...` FTP paths because PX4 `mavlink_ftp` `_root_dir` is empty (`PX4_ROOTFSDIR`) on NuttX — a QGC/transport fix (inoflyGCU `6351f519d`), not architectural. No change to the chain of trust, keys, the POST signature/hash split, or the compliance-param model. |

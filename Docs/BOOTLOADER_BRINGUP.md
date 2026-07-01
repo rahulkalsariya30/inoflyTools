@@ -301,6 +301,29 @@ ADR-023 execution, on a build with `CONFIG_BOOTLOADER_REFUSE_DFU` ON:
   (tamper seal) is the compensating control that closes it. Recorded here so
   the bring-up state is not mistaken for the production state.
 
+### B8 — signed `bl_update` (BOOT008 / T11-H) ⭐ NEW 2026-06-30
+**Covers:** BOOT008 — `bl_update` verify-before-erase ([ADR-025](ARCHITECTURE.md)).
+**Prereq:** an app fw built from `cubeorangeplus_default` with
+`CONFIG_BL_UPDATE_REQUIRE_SIG=y` (the default secure target), and the **signed**
+bootloader artifact on SD (`bootloader_artifact/…bootloader.bin`, produced by
+`tools/signer/sign_bootloader.py` — B-2). Lower brick-risk than B2: the reject
+path **never erases**, so a failed verify leaves the running bootloader intact.
+Run on wall power anyway (the accept path does erase + flash sector 0).
+- **B8.1 signed → accept.** `bl_update /fs/microsd/…bootloader.bin` with the
+  signed artifact → expect `BOOT008: bootloader signature verified`, then the
+  normal image-validate → erase → flash → verify → complete, and a clean reboot.
+- **B8.2 tampered → reject, no erase.** Flip one byte in the BOOT region of a
+  copy on SD (offline, before flashing) and `bl_update` it → expect
+  `BOOT008: bootloader signature INVALID - refusing to flash (sector 0 untouched)`
+  and a **non-zero exit with the running bootloader still booting** (reboot to
+  confirm the old bootloader is intact — nothing was erased).
+- **B8.3 unsigned → reject.** `bl_update` a bootloader built without the signer
+  step (256-byte zero SIG, or a pre-BOOT008 bin with no TOC) → expect the same
+  refusal (`no image TOC …` or signature-invalid), sector 0 untouched.
+- **B8.4 recover.** Re-run B8.1 with the good signed artifact; confirm POST green.
+- **Pass:** signed accepted, tampered/unsigned refused **without erasing**,
+  recovery clean. This is the load-bearing evidence for T11-H closure.
+
 ---
 
 ## Relationship to ADR-023 (auto-flash)
@@ -375,6 +398,7 @@ enforces, recovery proves the work was reversible.
 | B5 BOOT005 DFU-refuse | ➖ **deferred** | 2026-06-06 | Moved to ADR-023 work package ([ADR-024](ARCHITECTURE.md)); not required for Phase 5b sign-off. |
 | B6 idempotent re-install | ✅ | 2026-06-30 | Re-ran `bl_update` with the **same** `bootloader.bin` already in sector 0, then rebooted: clean boot, InoflyGCS reconnected, POST `check_passed=true, failure_reason=0`, hashes **identical to B3** (`b405ef40…`/`f05e43d2…`). Idempotence proven — a half-written sector 0 would have dropped to DFU rather than booting a verified app, so the verified-clean boot is itself the evidence the re-install completed without disturbing app verification. Run on wall power. |
 | B7 SWD-open (pre-seal) | ✅ **DISPOSITIONED — n/a** | 2026-06-30 | SWD could not be brought up on this rig (see B0/BP4), so the pre-seal SWD-open path was never confirmable here; **dispositioned n/a 2026-06-30** alongside B0. **De-facto recovery path on this unit = USB-DFU, not SWD.** BOOT007 tamper seal still closes both USB and SWD in production (unchanged). |
+| B8 signed `bl_update` (BOOT008) ⭐ | ⬜ **pending hardware** | | **NEW hardening gate — [ADR-025](ARCHITECTURE.md), not a Phase 5b / L1 requirement.** Code complete (B-1…B-3), builds NuttX + SITL. Needs bench run: signed→accept / tampered→reject-no-erase / unsigned→reject / recover. Lower risk than B2 (reject never erases). |
 
 ---
 
@@ -390,6 +414,7 @@ enforces, recovery proves the work was reversible.
 | 0.8 | 2026-06-09 | **Closed the v0.7 finding's tooling gap: BOOT001 image signing is now automated in `tools/pipeline.py` (step 0).** The release pipeline patches the RSA-PSS image signature before checksum/bundle, so `release/<stem>.px4` is signed; SITL/non-secure images (no TOC) pass through untouched; `--no-bootloader-sign` opts out. Added `tests/compliance/test_PIPE_pipeline.py::TestBoot001PipelineSigning` (4 tests; full suite 351 green). B1.5 rewritten to use the pipeline; BP3 → 🟡 (tooling done, must run + flash before B2). MANUFACTURING_RUNBOOK Step 3 corrected to flash the pipeline-produced signed `.px4`. |
 | 0.7 | 2026-06-09 | **Pre-bench code review of the bootloader crypto path + flash chain.** Verified correct: RSA-PSS wiring (SHA-256/MGF1-SHA256/salt 32) matches `toc_sign.py` exactly; embedded 294-B RSA-2048 **SPKI** DER imports via libtomcrypt `rsa_import` (SPKI path) from keystore slot 0; TOC placement (`magic@0x2A8`, BOOT `flags=0x5`, SIG1 follows); fail-closed boot flow; `bl_update` accepts our bootloader (SP in AXI SRAM passes the H7 `STM_RAM_BASE` check, 103 KB < 128 KB sector) and header-validates before erase. **🔴 Critical finding → new step B1.5:** the app fw is shipped **unsigned** (256-byte zero placeholder; no build/`pipeline.py` `toc_sign.py` step) — flashing it under the secure bootloader would fail B3 fail-closed (looks like a brick). Corrected BP3 (was falsely ✅). Host signing chain validated off-hardware end-to-end (sign→post-verify pass on the real 1.83 MB build; signature survives `px_mkfw.py` `.px4` wrap, board_id 1063). |
 | 0.6 | 2026-06-09 | **Option B re-ratified after a B2 brick-probability assessment** (residual brick risk *low*, dominated by power-loss during the ~5–10 s `bl_update` window; corruption/`bl_update`-bug triggers retired by B1 pass + header-validate-before-erase; mitigation = rock-stable wall power for B2). Decision is now settled — the long-running A/B deferral is closed. **Confirmed wiring for the in-hand ST-Link V2 (black clone)** folded into B0 step 1: ST-Link `pin4(SWDIO)/pin2(SWCLK)/pin6(GND)` → carrier FMU `pin4/pin5/pin6` (clone pinout differs from the green forum unit — wire by signal label). Solder-direct 32 AWG build. Sign-off + history updated. |
+| 1.2 | 2026-06-30 | **Added B8 — signed `bl_update` (BOOT008 / [ADR-025](ARCHITECTURE.md)) bring-up step.** Code for BOOT008 is complete (B-1 bootloader embedded TOC, B-2 host signer, B-3 `bl_update` verify-before-erase); this adds the hardware validation step (signed→accept / tampered→reject-no-erase / unsigned→reject / recover) and a pending sign-off row. **B8 is a defense-in-depth hardening gate, NOT part of Phase 5b / DGCA Level 1 sign-off** (which remains closed per v1.1). |
 | 1.1 | 2026-06-30 | **B0/B7 dispositioned → Phase 5b signed off.** Ratified **USB-DFU as the recovery path of record** for this bring-up unit and re-scoped the B0 SWD rehearsal out of the hard gate (no SWD access to the unit; reversibility already demonstrated 4× via USB-DFU). B0 → DISPOSITIONED (re-scoped), B7 → DISPOSITIONED (n/a). Sign-off criteria reworded (B1.5–B4 + B6 + recovery-by-available-path). Two caveats recorded: (1) USB-DFU recovery is **coupled to BOOT005 staying deferred** ([ADR-024](ARCHITECTURE.md)) — re-confirm the DFU window when BOOT005 lands; (2) the [MANUFACTURING_RUNBOOK](MANUFACTURING_RUNBOOK.md) production-RMA SWD assumption is **untouched** (factory tooling ≠ this bench rig). |
 | 1.0 | 2026-06-30 | **B6 PASS — last executable gate step closed.** Re-ran `bl_update` with the same bootloader binary already in sector 0; clean reboot, POST green, app code/data hashes identical to B3 → idempotent re-install confirmed (= the field/RMA update mechanic). All executable steps now green: **B1.5–B4 + B6 ✅**, extended negatives ✅; **B0 waived / B7 n/a** (SWD rig never came up — recovery-of-record on this unit = USB-DFU), **B5 deferred** ([ADR-024](ARCHITECTURE.md)). Remaining for formal Phase-5b sign-off is a **decision, not a bench step**: ratify USB-DFU as recovery-of-record (re-scoping the B0 SWD rehearsal) **or** revive the SWD rig. |
 | 0.9 | 2026-06-13 | **Gate executed on hardware — B1.5–B4 + extended negatives PASS; B0 waived.** B1.5 (signed app flashed, POST `check_passed=true`, hashes match pipeline) → B2 (`bl_update` from SD clean) → B3 (secure BL RSA-PSS-verified + handed off, POST green) → B4 (tampered app rejected fail-closed) → **extended negatives** (wrong-key attacker RSA-2048, and unsigned zero-placeholder — both rejected identically) → recovery (good `.px4` over USB-DFU, POST green). **B0 WAIVED:** SWD link never established on the bench rig (ST-Link enumerates; CubeProgrammer "No STM32 target found"); proceeded under the ratified Option-B risk acceptance on wall power; recovery proven via USB-DFU instead (valid — BOOT005 not installed). **Target-name fix:** B1.5 block corrected `_inofly`→`_default` (the `inofly.px4board` is stale and lacks `CONFIG_MODULES_SECURE_BOOT` — building it would ship an app with no POST module). Bench fixtures deleted from `release/`. **Remaining:** B6 (idempotent re-install); B0/B7 SWD disposition; `param_status` cosmetic label (`ADR-019`→`ADR-020`, LOCKED-at-0 shows `UNSET`) on next reflash. |

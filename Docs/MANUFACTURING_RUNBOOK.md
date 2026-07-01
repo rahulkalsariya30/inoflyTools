@@ -148,16 +148,29 @@ Time estimate: ~30 minutes per unit once Pre-flight is settled.
 > card as a one-shot. (The old flow issued `flashbootloader` and the app
 > fw extracted the bootloader from ROMFS; that path is retired because
 > the ROMFS bundle cost ~103 KB of app FLASH.)
+>
+> ⭐ **AMENDED 2026-06-30 (ADR-025 / BOOT008).** The bootloader artifact
+> is now a **manufacturer-signed** image (embedded-TOC RSA-PSS signature),
+> and the running app fw (built with `CONFIG_BL_UPDATE_REQUIRE_SIG=y`)
+> **verifies that signature before erasing sector 0** — it refuses an
+> unsigned or tampered bootloader fail-closed. The artifact in
+> `bootloader_artifact/` is already signed by the release pipeline; do
+> **not** hand-copy an unsigned build here (it will be refused).
 
-- Place `secure_bootloader.bin` on the SD card (copy via card reader, or
-  upload via QGC MAVLink-FTP to `/fs/microsd/`). The canonical artifact
-  is `boards/cubepilot/cubeorangeplus/bootloader_artifact/cubepilot_cubeorangeplus_bootloader.bin`
+- Place the **signed** `cubepilot_cubeorangeplus_bootloader.bin` on the SD
+  card (copy via card reader, or upload via QGC MAVLink-FTP to
+  `/fs/microsd/`). The canonical artifact is
+  `boards/cubepilot/cubeorangeplus/bootloader_artifact/cubepilot_cubeorangeplus_bootloader.bin`
   in the PX4 fork — the BOOT001 bootloader with the embedded manufacturer
-  pubkey.
+  pubkey, **signed for BOOT008** (`tools/signer/sign_bootloader.py`).
 - From QGC's MAVLink Console (or `nsh` over USB), run:
   `bl_update /fs/microsd/cubepilot_cubeorangeplus_bootloader.bin`.
-  The running app fw validates the image header, erases sector 0, writes
-  the secure bootloader, and verifies (~5–10 s).
+  The running app fw **RSA-PSS-verifies the candidate bootloader** (expect
+  `BOOT008: bootloader signature verified`), then validates the image
+  header, erases sector 0, writes the secure bootloader, and verifies
+  (~5–10 s). If the signature is invalid it prints
+  `BOOT008: … refusing to flash (sector 0 untouched)` and aborts **without
+  erasing** — re-check that you copied the signed artifact.
 - Wait for completion and reboot the device.
 - Observe boot progress LEDs / serial output to confirm the secure
   bootloader is now running.

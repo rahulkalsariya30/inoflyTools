@@ -1,6 +1,6 @@
 # Threat Model — Inofly UAS Firmware Security
 
-**Document version:** 1.3
+**Document version:** 1.4
 **Date:** 2026-06-30 (amended)
 **Scope:** DGCA Level 1 Type Certification — Firmware Manufacturer
 **Framework:** Adapted from STRIDE for embedded UAS systems
@@ -35,6 +35,15 @@
 > future airframe that exposes USB *outside* the seal. The residual-risk
 > ratings ("Low on sealed production units") are unchanged because they already
 > rest on the seal, not on BOOT005.
+
+**Changes in 1.4 (2026-06-30):**
+- **T11-H flipped to IMPLEMENTED (BOOT008 / [ADR-025](ARCHITECTURE.md)):** the
+  bootloader is now a signed embedded-TOC artifact and `bl_update` RSA-PSS-
+  verifies it before erasing sector 0 (refuse-before-erase). Updated the T11-H
+  section (added Resolution row), the T11 and T11-H Risk Summary rows. The
+  `bl_update` sector-0 path is now closed by cryptography, not only the seal +
+  access control; pending hardware validation (BOOTLOADER_BRINGUP B8). Residual
+  narrows to signing-process compromise + rollback (T14, still open).
 
 **Changes since 1.2 (2026-06-13 → 2026-06-30):**
 - **T11 / T12' `bl_update` claim corrected (2026-06-13, hardware finding):**
@@ -266,13 +275,20 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | **Mitigations** | ~~BOOT003 (RDP Level 2 permanently disables SWD/JTAG — debug probe cannot enumerate the target). On dev boards (RDP 0), this remains an accepted risk.~~ ⚠️ **AMENDED 2026-05-04 (ADR-013):** ✅ **BOOT007 (tamper-evident seal + UID/seal-serial tracking).** Reaching SWD/JTAG requires visibly breaking the seal on the airframe AND on the Cube enclosure. Detection is procedural — units returning with broken seals are quarantined on RMA receipt and not re-flown without re-provisioning. The compensating control replaces RDP L2's hardware-level SWD-disable with an operational seal-and-track workflow. On dev boards (no seal applied), this remains an accepted risk for dev-only segregation. |
 | **Residual risk** | ~~HIGH on dev boards — accepted because dev units are not flown in regulated airspace. NONE on production units after RDP L2.~~ ⚠️ **AMENDED 2026-05-04:** ✅ **HIGH on dev boards** (no seal — accepted, dev-only segregation as before). **LOW at the cryptographic layer on sealed production units** (the SWD path requires the seal-breaking step). The remaining physical-attacker residual on sealed units is acknowledged and compensated procedurally (Section 6); a successful T13 attack would leave physically visible evidence (broken seal) that triggers RMA quarantine. |
 
-### T11-H — Hardening option: cryptographically signed bootloader updates ⭐ NEW 2026-06-13
+### T11-H — Cryptographically signed bootloader updates ⭐ NEW 2026-06-13 · ✅ IMPLEMENTED 2026-06-30 (BOOT008 / ADR-025)
+
+> ✅ **IMPLEMENTED 2026-06-30 (BOOT008 / [ADR-025](ARCHITECTURE.md)).** This was
+> raised 2026-06-13 as a future hardening option; it is now built in code
+> (B-1…B-3). The `bl_update` path is closed by **cryptography**, not only by the
+> seal + access control. Pending hardware validation (BOOTLOADER_BRINGUP **B8**).
+> Still **not** a DGCA Level 1 gate — defense-in-depth that raises the path from
+> tamper-evident to tamper-resistant.
 
 | Field | Value |
 |-------|-------|
-| **Gap** | `bl_update` (the only sanctioned sector-0 writer) performs **no signature check** on the bootloader image — only a vector-table sanity check (`bl_update.cpp:167`). On a deployed unit the bootloader-replacement path (T11/T12') is closed by **tamper-evidence** (BOOT007 seal + RMA inspection) and access control (MAVLink signing on remote), **not by cryptography**. A seal-breaking physical attacker with console access can install an unsigned/malicious bootloader. |
-| **Status** | **Accepted for DGCA Level 1.** The required integrity property — "the bootloader on a deployed unit is the one the manufacturer intended" — is delivered by bootstrap-trust + the tamper seal (ADR-013/015), the standard pattern at this hardware tier (ArduPilot ships the same). Validated on hardware 2026-06-13 (BOOTLOADER_BRINGUP B2–B4): only manufacturer-signed app fw boots, so the `bl_update` command is unreachable to attacker code. |
-| **Optional hardening (future BOOT00x)** | Give the bootloader binary its own manufacturer signature (a TOC / detached RSA-PSS sig, mirroring the app image's BOOT001) and have `bl_update` (or a thin wrapper) **verify it before erasing sector 0**. Upgrades the `bl_update` path from **tamper-evident → tamper-resistant** — even a seal-breaking, console-having attacker could not install an unsigned bootloader. Same "add later for the audited reference parity / higher assurance" basket as flash encryption (BOOT004). Not required for Level 1. Pairs naturally with T14 anti-rollback. |
+| **Gap (as of 2026-06-13, now closed)** | `bl_update` (the only sanctioned sector-0 writer) performed **no signature check** on the bootloader image — only a vector-table sanity check (`bl_update.cpp:167`). On a deployed unit the bootloader-replacement path (T11/T12') was closed by **tamper-evidence** (BOOT007 seal + RMA inspection) and access control (MAVLink signing on remote), **not by cryptography**. A seal-breaking physical attacker with console access could install an unsigned/malicious bootloader. |
+| **Resolution (BOOT008)** | The bootloader is now a manufacturer-signed embedded-TOC artifact (`bl_toc.c`, B-1), signed host-side (`sign_bootloader_image`, B-2). `bl_update` RSA-PSS-verifies the candidate bootloader against the embedded manufacturer key on the same in-RAM buffer it will flash, and **refuses before erasing sector 0** on any failure (B-3, shared `secure_verify` lib; gated by `CONFIG_BL_UPDATE_REQUIRE_SIG=y` on the secure target). Refuse-before-erase adds no brick path. Even a seal-breaking, console-having attacker can no longer install an **unsigned** bootloader. |
+| **Status** | ✅ **IMPLEMENTED in code (B-1…B-3), builds on NuttX + SITL; pending hardware validation (BOOTLOADER_BRINGUP B8).** The Level 1 integrity property was already delivered by bootstrap-trust + the tamper seal (ADR-013/015, the standard pattern at this tier — ArduPilot ships the same); BOOT008 hardens it. Residual: signing-process compromise (still produces a validly-signed image — §13 residual) and rollback (T14 — authenticity not freshness; no version counter). |
 
 ### T14 — Firmware rollback / downgrade ⭐ NEW 2026-06-13
 
@@ -300,11 +316,11 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | T8 — Flash corruption | **Low** | Low |
 | T9 — Board ID mismatch | **Medium** | Low |
 | T10 — DFU (Path A) bypass | **High** (Phase 5b open) | ~~Low (BOOT001) → None (BOOT003)~~ ~~✅ Low (BOOT001 + BOOT005)~~ → **Low: BOOT001 + tamper seal (BOOT007)**; BOOT005 = DiD, deferred into ADR-023 (ADR-024) |
-| T11 — Bootloader replacement | **High** (no seal, no DFU-refuse) | **Low on sealed production units** — ⚠️ **2026-06-13:** closure is **BOOT007 seal + access control** (only-signed-app-runs + MAVLink signing), **not** crypto on the `bl_update` path (`bl_update` does no sig check — see T11/T11-H). BOOT005 = DiD/deferred per ADR-024 |
+| T11 — Bootloader replacement | **High** (no seal, no DFU-refuse) | **Low on sealed production units** — ⚠️ **2026-06-13:** closure was **BOOT007 seal + access control** (only-signed-app-runs + MAVLink signing), **not** crypto on the `bl_update` path. ✅ **2026-06-30 (BOOT008/ADR-025):** `bl_update` now RSA-PSS-verifies the bootloader before erase, so unsigned images are refused by **cryptography** too (pending B8 hw validation). BOOT005 = DiD/deferred per ADR-024 |
 | ~~T12 — OTP key tampering~~ | ~~**None**~~ | ~~None (hardware-enforced)~~ 🚫 Retired — see T12' |
 | T12' — Bootloader-embedded pubkey tampering ⭐ | **High** (Phase 5b open) | Low at crypto layer on sealed production units (same controls as T11); physical-attacker residual handled procedurally |
 | T13 — Debugger verify skip | **High** (no seal) | ~~None (RDP L2)~~ ✅ Low at crypto layer on sealed production units (BOOT007); RMA inspection workflow for the seal-breaking case |
-| T11-H — Signed bootloader updates (hardening) ⭐ | n/a (option) | Optional crypto gate on `bl_update` (tamper-evident → tamper-resistant); future BOOT00x, not required for L1 |
+| T11-H — Signed bootloader updates ⭐ | High if `bl_update` reachable + unsigned accepted | ✅ **IMPLEMENTED (BOOT008/ADR-025)** — `bl_update` verify-before-erase; tamper-evident → tamper-resistant. Pending B8 hw validation; not required for L1. Residual: signing-process compromise, rollback (T14) |
 | T14 — Firmware rollback ⭐ | **Low** (access-gated) | Accepted residual — by design, no version counter; future BOOT00x if wanted |
 
 ---
