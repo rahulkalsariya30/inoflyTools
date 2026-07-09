@@ -338,6 +338,38 @@ self-reflash path gives healthy units a non-DFU way to update ([ADR-024](ARCHITE
 
 ---
 
+## B9 — staged SD update (ADR-023 A-4) — bench matrix
+
+**What it proves:** the bootloader's `sd_update_try()` applies a
+manufacturer-signed `UPDATE.BIN` staged at the SD **root** with RSA-PSS
+verify-**before**-erase, is idempotent across reboots, and refuses
+tampered/wrong-key images with flash untouched. This is an ADR-023
+work-package gate, **not** part of Phase 5b sign-off.
+
+**Artifacts (pre-validated offline 2026-07-09, `release/b9/`):**
+`cubepilot_cubeorangeplus_bootloader.bin` — A-4 bootloader, 108,152 B,
+signed (BOOT SHA-256 `44ff2a1a…`); `UPDATE.BIN` — raw signed app image
+(1,871,228 B, extracted from the release `.px4`; TOC parse + RSA-PSS
+signature both re-verified offline the way `sd_update.c` checks them).
+
+**Prep:** install the A-4 bootloader via `bl_update` from SD (the B2/B8
+mechanic — BOOT008 requires it to be signed, which it is). Wall power.
+
+| # | Test | Stage on SD | Expect |
+|---|---|---|---|
+| B9.1 | ALREADY_APPLIED (idempotence) | `UPDATE.BIN` identical to the running fw | Boot proceeds normally (one extra ~2–3 s hash pass); no erase; POST green; file left in place |
+| B9.2 | APPLIED (the real update) | `UPDATE.BIN` = a *different* signed fw build **+ its matching `manifest.bin`** in `inofly/` (promotion is A-6; until then copy the manifest manually like BP3) | Solid LED during erase (~10–20 s), flicker during write; new app boots; POST green against the new manifest |
+| B9.3 | REFUSED (tampered) | `UPDATE.BIN` with 1 byte flipped inside the signed range | Old app boots normally; flash untouched; file left in place |
+| B9.4 | REFUSED (wrong key) | attacker-key-signed image (reuse the B8 fixture recipe) | Same as B9.3 — refuses on authenticity, not structure |
+| B9.5 | NO_FILE (baseline) | no `UPDATE.BIN` | Boot behavior identical to pre-A-4 (fast probe fail-out) |
+| B9.6 | power-loss retry (stretch) | B9.2 setup; pull power mid-write (LED flickering) | Next boot re-verifies from SD and re-applies; new app boots. Torn image can't run: first vector-table word is committed last, so BOOT001/`jump_to_app` refuse until a full apply completes |
+
+Cleanup after the matrix: delete `UPDATE.BIN` from the card (app-side
+deletion/quarantine is A-6). Note the update-intent reboot from QGC is A-5;
+on the bench a plain reboot suffices — the bootloader probes every boot.
+
+---
+
 ## Sign-off
 
 Phase 5b is complete when **B1.5–B4 and B6 pass on a real CubeOrange+**, with
@@ -399,6 +431,7 @@ enforces, recovery proves the work was reversible.
 | B6 idempotent re-install | ✅ | 2026-06-30 | Re-ran `bl_update` with the **same** `bootloader.bin` already in sector 0, then rebooted: clean boot, InoflyGCS reconnected, POST `check_passed=true, failure_reason=0`, hashes **identical to B3** (`b405ef40…`/`f05e43d2…`). Idempotence proven — a half-written sector 0 would have dropped to DFU rather than booting a verified app, so the verified-clean boot is itself the evidence the re-install completed without disturbing app verification. Run on wall power. |
 | B7 SWD-open (pre-seal) | ✅ **DISPOSITIONED — n/a** | 2026-06-30 | SWD could not be brought up on this rig (see B0/BP4), so the pre-seal SWD-open path was never confirmable here; **dispositioned n/a 2026-06-30** alongside B0. **De-facto recovery path on this unit = USB-DFU, not SWD.** BOOT007 tamper seal still closes both USB and SWD in production (unchanged). |
 | B8 signed `bl_update` (BOOT008) ⭐ | ✅ | 2026-07-01 | **NEW hardening gate — [ADR-025](ARCHITECTURE.md), not a Phase 5b / L1 requirement.** Validated on real CubeOrange+ (BOOT008 app fw flashed, FLASH 95.18%; POST `check_passed=true`, hashes `4c4a34fc…`/`a3e97bae…`; matching `manifest.bin` regenerated for the new app). **Signed→accept:** `BOOT008: bootloader signature verified` → validate → erase → flash → verify → complete; clean reboot, POST green. **All negatives refuse before erase (sector 0 untouched, no erase/flash lines):** byte-flip tampered (`secure_verify ret=0`), zeroed-SIG unsigned (`ret=7`), and **attacker-key** — a structurally valid RSA-PSS signature by the wrong RSA-2048 key (`ret=7`), the load-bearing wrong-key negative proving the gate checks *authenticity* vs the embedded manufacturer pubkey, not signature presence. **Recover:** re-flashed the good signed bootloader → accept → POST green. All 4 fixtures pre-validated offline (manufacturer-verify=FAIL, attacker-verify=PASS). **T11-H closed.** |
+| B9 staged SD update (ADR-023 A-4) ⭐ | ⏳ pending | — | Code complete + committed (PX4 `c4aa2811eb`); artifacts pre-validated offline in `release/b9/` (signed A-4 BL `44ff2a1a…`; `UPDATE.BIN` TOC-parse + RSA-PSS re-verified). Bench matrix B9.1–B9.6 above. Reminder: POST-passing check from the last bench session (`listener firmware_integrity_status` / `secure_boot status`) is still pending — fold into B9.1. |
 
 ---
 
@@ -406,6 +439,7 @@ enforces, recovery proves the work was reversible.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.4 | 2026-07-09 | **Added B9 — staged SD update bench matrix (ADR-023 A-4).** `sd_update.c` landed in the secure bootloader (RSA-PSS verify-before-erase, idempotent every-boot retry, first-word-last commit; PX4 `c4aa2811eb`; gate-off size unchanged 103,824 B, gate-on 108,152 B / 128 KB). B9.pre spike work (SDMMC RESP1 off-by-one fix + `led_blink_suspend`) had already fully passed on the bench earlier the same day (`4c1541d215`). B9 is an ADR-023 work-package gate, not Phase 5b. |
 | 1.3 | 2026-07-01 | **B8 PASS — BOOT008 / T11-H validated on real CubeOrange+.** Flashed the BOOT008 app fw (regenerated + resigned `.px4` via `pipeline.py` + matching `manifest.bin` for the new binary; POST green, hashes `4c4a34fc…`/`a3e97bae…`). Signed bootloader accepted (verify-before-erase); tampered (byte-flip), unsigned (zeroed SIG), and **attacker-key** (wrong-RSA-2048, structurally valid sig) all refused fail-closed with sector 0 untouched; recovery clean. `param_status` KIND-aware display also confirmed on hardware (first reflash since the cosmetic fix). B8 is a defense-in-depth hardening gate; Phase 5b / L1 sign-off unchanged (v1.1). |
 | 0.1 | 2026-06-05 | Initial draft. Engineering bring-up gate for the secure bootloader (B0–B7), the unit/brick-risk decision (recovery-first), and the Phase 0 pre-reqs. Surfaces the BOOT005 DFU-refuse implementation gap (BP2). |
 | 0.2 | 2026-06-06 | **Unit decision ratified: Option B** (single Tier-1 unit + pre-staged SWD recovery). Sign-off + BP4 rows updated; stale BP2/B5 BOOT005 sign-off rows reconciled with [ADR-024](ARCHITECTURE.md) (deferred, not gating). **BP1 + B1 closed off-hardware** (artifact size/vector-table valid, embedded SPKI DER == manufacturer pubkey). Remaining B0/B2/B3/B4/B6/B7 are hardware-only — blocked on BP4 (procure SWD probe + Cube DEBUG cable), then B0 recovery rehearsal (hard gate). |
