@@ -339,3 +339,107 @@ class TestBoot001PipelineSigning:
             verbose=False,
         )
         assert result.bootloader_image_signed is False
+
+
+# ---------------------------------------------------------------------------
+# ADR-023 (A-8): hardware pipeline emits the SD-staging artifacts
+# ---------------------------------------------------------------------------
+
+# The synthetic build lives with the ADR-023 suite (same directory).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_ADR023_sd_update import build_synthetic_setup  # noqa: E402
+from tools.bundler.bundler import UPDATE_IMAGE_NAME, UPDATE_META_NAME  # noqa: E402
+from tools.checksum.checksum import extract_image_bytes  # noqa: E402
+from tools.make_a10_fixtures import parse_staged_image, region_digests  # noqa: E402
+import hashlib  # noqa: E402
+import zipfile  # noqa: E402
+
+
+class TestADR023PipelineSdArtifacts:
+    """Hardware runs (ELF given) must emit loose UPDATE.BIN + UPDATE.MTA that
+    are byte-identical to the bundle's artifacts and satisfy the device
+    contract; SITL runs must emit neither."""
+
+    @pytest.fixture
+    def hw_run(self, temp_keys, tmp_path):
+        private_key, public_key = temp_keys
+        # The pipeline gets the UNSIGNED px4 — step 0 signs the image itself.
+        setup = build_synthetic_setup(tmp_path, private_key.read_bytes())
+        result = run_pipeline(
+            px4_path=setup["unsigned_px4"],
+            output_dir=tmp_path / "release",
+            elf_path=setup["elf_path"],
+            private_key_path=private_key,
+            public_key_path=public_key,
+            verbose=False,
+        )
+        return setup, result, public_key
+
+    def test_ADR023_pipeline_emits_loose_sd_files(self, hw_run):
+        _setup, result, _pub = hw_run
+        assert result.update_image_path.name == "UPDATE.BIN"
+        assert result.update_meta_path.name == "UPDATE.MTA"
+        assert result.update_image_path.exists()
+        assert result.update_meta_path.exists()
+
+    def test_ADR023_loose_files_match_bundle_artifacts(self, hw_run):
+        """The bench SD copies must be byte-identical to what QGC will later
+        extract from the bundle — one artifact, two delivery paths."""
+        _setup, result, _pub = hw_run
+        with zipfile.ZipFile(result.fwbundle_path) as zf:
+            assert result.update_image_path.read_bytes() == zf.read(UPDATE_IMAGE_NAME)
+            assert result.update_meta_path.read_bytes() == zf.read(UPDATE_META_NAME)
+
+    def test_ADR023_update_bin_is_the_step0_signed_image(self, hw_run):
+        """UPDATE.BIN must be the exact image the shipped .px4 carries (the
+        BOOT001-signed one), not a re-extraction of the unsigned input."""
+        _setup, result, public_key = hw_run
+        update_bin = result.update_image_path.read_bytes()
+        assert update_bin == extract_image_bytes(result.firmware_path)
+        assert verify_image(update_bin, public_key.read_bytes()) is True
+
+    def test_ADR023_update_meta_satisfies_device_contract(self, hw_run):
+        setup, result, _pub = hw_run
+        meta = json.loads(result.update_meta_path.read_text())
+        raw = result.update_image_path.read_bytes()
+        signed_len, image_size = parse_staged_image(raw)
+        assert meta["image_size"] == len(raw) == image_size
+        assert meta["code_len"] + meta["data_len"] == signed_len
+        assert meta["code_len"] == setup["code_len"]
+        assert meta["data_len"] == setup["data_len"]
+        assert meta["sha256"] == hashlib.sha256(raw).hexdigest()
+
+    def test_ADR023_update_bin_binds_to_pipeline_manifest(self, hw_run):
+        """Gate-1 preview: the emitted image's region digests must equal the
+        manifest checksums the pipeline signed — the exact binding the device
+        enforces before rebooting into the bootloader."""
+        _setup, result, _pub = hw_run
+        meta = json.loads(result.update_meta_path.read_text())
+        code, data, _ = region_digests(result.update_image_path.read_bytes(),
+                                       meta["code_len"], meta["data_len"])
+        assert code == result.manifest["code_checksum"]
+        assert data == result.manifest["data_checksum"]
+
+    def test_ADR023_sitl_run_emits_no_sd_files(self, fake_px4, temp_keys, tmp_path):
+        private_key, public_key = temp_keys
+        result = run_pipeline(
+            px4_path=fake_px4,
+            output_dir=tmp_path / "release",
+            private_key_path=private_key,
+            public_key_path=public_key,
+            verbose=False,
+        )
+        assert result.update_image_path is None
+        assert result.update_meta_path is None
+        assert not (tmp_path / "release" / "UPDATE.BIN").exists()
+        assert not (tmp_path / "release" / "UPDATE.MTA").exists()
+
+    def test_ADR023_bundle_update_manifest_signed_with_pipeline_key(self, hw_run):
+        """Regression for the latent create_bundle key bug: the bundle's
+        embedded update_manifest.bin must verify under the key the pipeline
+        ran with, not whatever sits at the default key path."""
+        _setup, result, public_key = hw_run
+        from tools.provisioning.export_manifest import verify_binary_manifest
+        with zipfile.ZipFile(result.fwbundle_path) as zf:
+            binary = zf.read("update_manifest.bin")
+        assert verify_binary_manifest(binary, public_key_path=public_key) is True

@@ -12,6 +12,7 @@ Requirement: PKG001
 """
 
 import base64
+import hashlib
 import json
 import zipfile
 import zlib
@@ -20,15 +21,23 @@ from pathlib import Path
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tools.bundler.bundler import (
     create_bundle,
     verify_bundle,
     inspect_bundle,
     extract_firmware,
+    UPDATE_IMAGE_NAME,
+    UPDATE_META_NAME,
 )
+from tools.checksum.checksum import generate_manifest
 from tools.pki.keygen import generate_keypair
 from tools.signer.signer import sign_manifest
+
+# Synthetic hardware build (signed TOC image + matching ELF) — shared with
+# the ADR-023 suite, which owns the builder.
+from test_ADR023_sd_update import build_synthetic_setup
 
 
 # ---------------------------------------------------------------------------
@@ -268,3 +277,159 @@ class TestPKG001_InspectAndExtract:
         extracted = extract_firmware(bundle_output, extract_dir)
 
         assert extracted.read_bytes() == original_bytes
+
+
+# ---------------------------------------------------------------------------
+# PKG001 — v1.2 staged-update artifacts (ADR-023 A-8)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def hw_setup(tmp_path, keypair):
+    """Synthetic hardware build signed with this test's manufacturer key."""
+    return build_synthetic_setup(tmp_path, keypair["private"].read_bytes())
+
+
+@pytest.fixture
+def hw_signed_manifest(hw_setup, keypair):
+    """Checksum manifest in ELF mode (the hashes the FC POST computes),
+    signed — what the pipeline hands create_bundle in hardware mode."""
+    manifest = generate_manifest(hw_setup["signed_px4"], elf_path=hw_setup["elf_path"])
+    return sign_manifest(manifest, private_key_path=keypair["private"])
+
+
+@pytest.fixture
+def hw_bundle(tmp_path, hw_setup, hw_signed_manifest, keypair):
+    output = tmp_path / "hw.fwbundle"
+    create_bundle(hw_setup["signed_px4"], hw_signed_manifest, output,
+                  private_key_path=keypair["private"],
+                  elf_path=hw_setup["elf_path"])
+    return output
+
+
+def _rewrite_bundle(src: Path, dst: Path, replace: dict = None, drop: set = None):
+    """Copy a bundle, replacing/removing entries — the tamper helper."""
+    replace = replace or {}
+    drop = drop or set()
+    with zipfile.ZipFile(src, "r") as zin, zipfile.ZipFile(dst, "w") as zout:
+        for item in zin.infolist():
+            if item.filename in drop:
+                continue
+            data = replace.get(item.filename, zin.read(item.filename))
+            zout.writestr(item, data)
+    return dst
+
+
+class TestPKG001_UpdateArtifacts:
+    """Hardware bundles must carry device-contract-valid SD-staging artifacts;
+    SITL bundles must not; verification must catch every tampered combination."""
+
+    def test_PKG001_hw_bundle_contains_update_artifacts(self, hw_bundle):
+        with zipfile.ZipFile(hw_bundle) as zf:
+            names = zf.namelist()
+        assert UPDATE_IMAGE_NAME in names
+        assert UPDATE_META_NAME in names
+
+    def test_PKG001_sitl_bundle_has_no_update_artifacts(self, tmp_path, signed_manifest):
+        """No ELF -> no staged-update path -> the entries must be absent, not
+        present-but-empty."""
+        px4_path = make_px4_file(tmp_path)
+        output = tmp_path / "sitl.fwbundle"
+        create_bundle(px4_path, signed_manifest, output)
+        with zipfile.ZipFile(output) as zf:
+            names = zf.namelist()
+        assert UPDATE_IMAGE_NAME not in names
+        assert UPDATE_META_NAME not in names
+
+    def test_PKG001_update_image_is_the_signed_flash_image(self, hw_bundle, hw_setup):
+        with zipfile.ZipFile(hw_bundle) as zf:
+            assert zf.read(UPDATE_IMAGE_NAME) == hw_setup["signed_image"]
+
+    def test_PKG001_update_meta_matches_device_contract(self, hw_bundle, hw_setup):
+        with zipfile.ZipFile(hw_bundle) as zf:
+            meta = json.loads(zf.read(UPDATE_META_NAME))
+            image = zf.read(UPDATE_IMAGE_NAME)
+        assert meta["image_size"] == len(image)
+        assert meta["code_len"] == hw_setup["code_len"]
+        assert meta["data_len"] == hw_setup["data_len"]
+        assert meta["code_len"] + meta["data_len"] == meta["image_size"] - 256
+        assert meta["sha256"] == hashlib.sha256(image).hexdigest()
+
+    def test_PKG001_bundle_info_records_update_image(self, hw_bundle):
+        info = inspect_bundle(hw_bundle)
+        assert info["update_image"]["image_size"] > 0
+
+    def test_PKG001_hw_bundle_verifies(self, hw_bundle, keypair):
+        assert verify_bundle(hw_bundle, public_key_path=keypair["public"]) is True
+
+    def test_PKG001_unsigned_px4_with_elf_refused(self, tmp_path, hw_setup,
+                                                  hw_signed_manifest, keypair):
+        """An image still carrying the zero signature placeholder would be
+        refused by the bootloader — packaging it must fail on the host."""
+        with pytest.raises(ValueError, match="placeholder"):
+            create_bundle(hw_setup["unsigned_px4"], hw_signed_manifest,
+                          tmp_path / "bad.fwbundle",
+                          private_key_path=keypair["private"],
+                          elf_path=hw_setup["elf_path"])
+
+    def test_PKG001_failed_artifact_build_leaves_no_bundle(self, tmp_path, hw_setup,
+                                                           hw_signed_manifest, keypair):
+        """The artifacts are built before the zip is opened, so a refusal must
+        not leave a half-written bundle a release process could pick up."""
+        output = tmp_path / "half.fwbundle"
+        with pytest.raises(ValueError):
+            create_bundle(hw_setup["unsigned_px4"], hw_signed_manifest, output,
+                          private_key_path=keypair["private"],
+                          elf_path=hw_setup["elf_path"])
+        assert not output.exists()
+
+    def test_PKG001_image_without_meta_raises(self, hw_bundle, tmp_path, keypair):
+        stripped = _rewrite_bundle(hw_bundle, tmp_path / "no_meta.fwbundle",
+                                   drop={UPDATE_META_NAME})
+        with pytest.raises(ValueError, match="counterpart"):
+            verify_bundle(stripped, public_key_path=keypair["public"])
+
+    def test_PKG001_meta_without_image_raises(self, hw_bundle, tmp_path, keypair):
+        stripped = _rewrite_bundle(hw_bundle, tmp_path / "no_image.fwbundle",
+                                   drop={UPDATE_IMAGE_NAME})
+        with pytest.raises(ValueError, match="counterpart"):
+            verify_bundle(stripped, public_key_path=keypair["public"])
+
+    def test_PKG001_tampered_update_image_caught_by_meta(self, hw_bundle, tmp_path,
+                                                         hw_setup, keypair):
+        """Swapping the image without touching the meta trips the transport
+        integrity check (sha256 mismatch)."""
+        tampered_image = bytearray(hw_setup["signed_image"])
+        tampered_image[hw_setup["code_len"] - 8] ^= 0x01
+        tampered = _rewrite_bundle(hw_bundle, tmp_path / "tampered.fwbundle",
+                                   replace={UPDATE_IMAGE_NAME: bytes(tampered_image)})
+        with pytest.raises(ValueError, match="sha256"):
+            verify_bundle(tampered, public_key_path=keypair["public"])
+
+    def test_PKG001_tampered_image_with_fixed_meta_fails_rsa(self, hw_bundle, tmp_path,
+                                                             hw_setup, keypair):
+        """An attacker who also fixes up the (unsigned) meta sidecar gets past
+        the transport check — the RSA-PSS gate must still refuse the image.
+        This is the check that mirrors the bootloader's verify-before-erase."""
+        tampered_image = bytearray(hw_setup["signed_image"])
+        tampered_image[hw_setup["code_len"] - 8] ^= 0x01
+        tampered_image = bytes(tampered_image)
+        with zipfile.ZipFile(hw_bundle) as zf:
+            meta = json.loads(zf.read(UPDATE_META_NAME))
+        meta["sha256"] = hashlib.sha256(tampered_image).hexdigest()
+        tampered = _rewrite_bundle(
+            hw_bundle, tmp_path / "tampered_fixed.fwbundle",
+            replace={UPDATE_IMAGE_NAME: tampered_image,
+                     UPDATE_META_NAME: json.dumps(meta) + "\n"})
+        assert verify_bundle(tampered, public_key_path=keypair["public"]) is False
+
+    def test_PKG001_garbage_update_image_raises(self, hw_bundle, tmp_path, keypair):
+        """A replaced image with no parseable TOC is structural corruption."""
+        garbage = b"\xde\xad\xbe\xef" * 1024
+        meta = {"image_size": len(garbage), "code_len": 4000, "data_len": 96,
+                "sha256": hashlib.sha256(garbage).hexdigest()}
+        tampered = _rewrite_bundle(
+            hw_bundle, tmp_path / "garbage.fwbundle",
+            replace={UPDATE_IMAGE_NAME: garbage,
+                     UPDATE_META_NAME: json.dumps(meta) + "\n"})
+        with pytest.raises(ValueError, match="TOC"):
+            verify_bundle(tampered, public_key_path=keypair["public"])

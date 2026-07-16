@@ -29,6 +29,7 @@ import base64
 import json
 import shutil
 import sys
+import zipfile
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,7 +40,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from tools.checksum.checksum import generate_manifest
 from tools.signer.signer import sign_manifest, verify_bundle
-from tools.bundler.bundler import create_bundle, verify_bundle as verify_fwbundle
+from tools.bundler.bundler import (
+    create_bundle,
+    verify_bundle as verify_fwbundle,
+    UPDATE_IMAGE_NAME,
+    UPDATE_META_NAME,
+)
 from tools.provisioning.export_manifest import (
     export_binary_manifest,
     verify_binary_manifest,
@@ -72,6 +78,11 @@ class PipelineResult:
     # for SITL / non-secure images (no image TOC -> nothing for the bootloader
     # to verify, so signing is correctly skipped).
     bootloader_image_signed: bool = False
+    # ADR-023 (A-8): loose SD-staging copies of the bundle's staged-update
+    # artifacts (UPDATE.BIN + UPDATE.MTA, the 8.3 names the bootloader's
+    # read-only FatFs looks for at the SD root). None for SITL runs (no ELF).
+    update_image_path: Path = None
+    update_meta_path: Path = None
 
 
 def sign_px4_bootloader_image(
@@ -220,9 +231,11 @@ def run_pipeline(
       1. CHK001 — compute SHA-256 checksums (code + data)
       2. SIG001 — sign manifest with manufacturer key
       3. Verify — confirm signature is valid before proceeding
-      4. PKG001 — package into .fwbundle
-      5. Verify — confirm bundle signature
-      6. PRV001 — export binary manifest (501 bytes)
+      4. PKG001 — package into .fwbundle (hardware mode also embeds the
+         ADR-023 staged-update artifacts, hash-binding-proven)
+      5. Verify — confirm bundle signature (incl. staged image RSA-PSS);
+         emit loose UPDATE.BIN + UPDATE.MTA for bench SD staging
+      6. PRV001 — export binary manifest (373 bytes)
       7. Verify — confirm binary manifest CRC + signature
 
     Args:
@@ -321,16 +334,33 @@ def run_pipeline(
         raise RuntimeError("SIGNATURE VERIFICATION FAILED — aborting pipeline")
     log(f"      Signature valid")
 
-    # Step 4: Bundle
+    # Step 4: Bundle. In hardware mode (elf_path) the bundle also carries the
+    # ADR-023 staged-update artifacts; create_bundle proves the code/data hash
+    # binding against the signed manifest before packaging them.
     fwbundle_path = output_dir / f"{stem}.fwbundle"
     log(f"[4/7] Packaging .fwbundle...")
-    create_bundle(px4_path, signed_bundle, fwbundle_path)
+    create_bundle(px4_path, signed_bundle, fwbundle_path,
+                  private_key_path=private_key_path, elf_path=elf_path)
 
-    # Step 5: Verify bundle
+    # Step 5: Verify bundle (for hardware bundles this includes the RSA-PSS
+    # check over the staged update image — the same check the bootloader does).
     log(f"[5/7] Verifying .fwbundle signature...")
     if not verify_fwbundle(fwbundle_path, public_key_path=public_key_path):
         raise RuntimeError("BUNDLE VERIFICATION FAILED — aborting pipeline")
     log(f"      Bundle valid")
+
+    # Emit loose SD-staging copies for bench use (B9/B10 flows) under the 8.3
+    # names the bootloader looks for at the SD root. Extracted from the
+    # just-verified bundle so they are byte-identical to what QGC will upload.
+    update_image_path = None
+    update_meta_path = None
+    if elf_path is not None:
+        update_image_path = output_dir / "UPDATE.BIN"
+        update_meta_path = output_dir / "UPDATE.MTA"
+        with zipfile.ZipFile(fwbundle_path) as zf:
+            update_image_path.write_bytes(zf.read(UPDATE_IMAGE_NAME))
+            update_meta_path.write_bytes(zf.read(UPDATE_META_NAME))
+        log(f"      SD staging:  {update_image_path} + {update_meta_path.name}")
 
     # Step 6: Binary manifest
     binary_manifest_path = output_dir / f"{stem}_manifest.bin"
@@ -364,6 +394,8 @@ def run_pipeline(
     log(f"  Firmware:        {firmware_path}")
     log(f"  Bundle:          {fwbundle_path}")
     log(f"  Binary manifest: {binary_manifest_path}")
+    if update_image_path is not None:
+        log(f"  SD staging:      {update_image_path} + {update_meta_path.name} (ADR-023)")
     log(f"  Signed JSON:     {signed_path}")
     log(f"  Version:         {manifest.get('firmware_version', 'unknown')}")
     log(f"  Board ID:        {manifest.get('board_id', 0)}")
@@ -376,6 +408,8 @@ def run_pipeline(
         binary_manifest_path=binary_manifest_path,
         all_verified=True,
         bootloader_image_signed=bootloader_image_signed,
+        update_image_path=update_image_path,
+        update_meta_path=update_meta_path,
     )
 
 
