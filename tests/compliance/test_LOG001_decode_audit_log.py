@@ -28,6 +28,8 @@ from tools.decode_audit_log import (  # noqa: E402
     EVENT_POST_RESULT,
     EVENT_UPDATE_ATTEMPT,
     EVENT_PARAM_CHANGE,
+    EVENT_UPDATE_APPLIED,
+    EVENT_UPDATE_APPLY_FAILED,
     RESULT_SUCCESS,
     RESULT_FAILURE,
     decode_bytes,
@@ -156,6 +158,45 @@ class TestDecodeEventLanguage:
             detail=b"FW update changed flight params"))
         assert "changed by a signed firmware update" in res.entries[0].headline
 
+    # ── ADR-023 A-6: first-boot promotion events (5/6) ────────────────────────
+
+    def test_LOG001_decode_update_applied_names_version(self):
+        # Firmware writes detail == "PROMOTED <version>" on a successful
+        # first-boot promotion; the headline surfaces the version.
+        res = decode_bytes(_build_entry(event_type=EVENT_UPDATE_APPLIED,
+                                        event_result=RESULT_SUCCESS,
+                                        detail=b"PROMOTED v1.16.0-rc1"))
+        e = res.entries[0]
+        assert "installed" in e.headline.lower()
+        assert "v1.16.0-rc1" in e.headline
+        assert "ADR-023" in e.requirement
+
+    def test_LOG001_decode_update_apply_failed_rollback(self):
+        # detail_code carries the promotion reject reason (REASON_ROLLBACK=8).
+        res = decode_bytes(_build_entry(event_type=EVENT_UPDATE_APPLY_FAILED,
+                                        event_result=RESULT_FAILURE,
+                                        detail_code=8, detail=b"FW_PROMOTE"))
+        e = res.entries[0]
+        assert "REFUSED" in e.headline
+        assert "rollback" in e.headline.lower()
+        assert "quarantined" in e.headline.lower()
+
+    def test_LOG001_decode_update_apply_failed_flash_mismatch(self):
+        # REASON_IMAGE_HASH_MISMATCH=6: running flash != staged manifest,
+        # i.e. the bootloader refused or never completed the install.
+        res = decode_bytes(_build_entry(event_type=EVENT_UPDATE_APPLY_FAILED,
+                                        event_result=RESULT_FAILURE,
+                                        detail_code=6, detail=b"FW_PROMOTE"))
+        e = res.entries[0]
+        assert "does not match" in e.headline
+        assert "bootloader" in e.headline.lower()
+
+    def test_LOG001_decode_update_apply_failed_unknown_reason(self):
+        res = decode_bytes(_build_entry(event_type=EVENT_UPDATE_APPLY_FAILED,
+                                        event_result=RESULT_FAILURE,
+                                        detail_code=99, detail=b"FW_PROMOTE"))
+        assert "unknown reason code 99" in res.entries[0].headline
+
 
 # ── CRC / integrity surfacing ─────────────────────────────────────────────────
 
@@ -198,19 +239,23 @@ class TestDecodeCoverage:
                            detail=b"FW_UPDATE")
             + _build_entry(event_type=EVENT_PARAM_CHANGE, event_result=RESULT_FAILURE,
                            sequence_num=3, detail=b"MPC_XY_VEL_MAX: attempted=30 ceiling=15")
+            + _build_entry(event_type=EVENT_UPDATE_APPLIED, sequence_num=4,
+                           detail=b"PROMOTED v1.16.0")
         )
         res = decode_bytes(log)
         cov = res.coverage()
         assert cov[EVENT_POST_RESULT] == 2
         assert cov[EVENT_UPDATE_ATTEMPT] == 1
         assert cov[EVENT_PARAM_CHANGE] == 1
+        assert cov[EVENT_UPDATE_APPLIED] == 1
 
         summary = render_summary(res)
         assert "POST001/002/003" in summary
         assert "UPD001" in summary
         assert "PAR001" in summary
         assert "LOG001" in summary
-        assert "Entries: 4" in summary
+        assert "ADR-023" in summary
+        assert "Entries: 5" in summary
 
     def test_LOG001_decode_empty_log(self):
         res = decode_bytes(b"")

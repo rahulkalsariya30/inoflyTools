@@ -82,10 +82,12 @@ def render_timestamp(timestamp_us: int) -> str:
 
 # ── Event vocabulary - mirrors msg/SecurityAuditEvent.msg ─────────────────────
 
-EVENT_POST_RESULT    = 1
-EVENT_UPDATE_ATTEMPT = 2
-EVENT_ARMING_BLOCKED = 3
-EVENT_PARAM_CHANGE   = 4
+EVENT_POST_RESULT         = 1
+EVENT_UPDATE_ATTEMPT      = 2
+EVENT_ARMING_BLOCKED      = 3
+EVENT_PARAM_CHANGE        = 4
+EVENT_UPDATE_APPLIED      = 5
+EVENT_UPDATE_APPLY_FAILED = 6
 
 RESULT_SUCCESS = 0
 RESULT_FAILURE = 1
@@ -97,6 +99,8 @@ EVENT_INFO = {
     EVENT_UPDATE_ATTEMPT: ("Firmware update",           "UPD001"),
     EVENT_ARMING_BLOCKED: ("Arming blocked",            "POST001 (arming gate)"),
     EVENT_PARAM_CHANGE:   ("Flight-parameter change",   "PAR001 / Gazette 7.1(c)"),
+    EVENT_UPDATE_APPLIED:      ("Firmware update installed", "UPD001 / ADR-023"),
+    EVENT_UPDATE_APPLY_FAILED: ("Firmware update refused on boot", "UPD001 / ADR-023"),
 }
 
 # detail_code on a POST_RESULT carries FirmwareIntegrityStatus.failure_reason.
@@ -108,6 +112,21 @@ POST_REASON = {
     4: "the firmware code has changed since it was signed (code hash mismatch)",
     5: "the certified flight parameters have changed (parameter hash mismatch)",
     6: "this firmware was built for a different board (board ID mismatch)",
+}
+
+# detail_code on an UPDATE_APPLY_FAILED carries the reject reason the
+# first-boot promotion refused for — the firmware_update_authorization
+# REASON_* codes, worded for the promotion context.
+PROMOTE_FAIL_REASON = {
+    1: "no update manifest accompanied the staged image",
+    2: "the update manifest is corrupt (CRC check failed)",
+    3: "the update manifest is not signed by the manufacturer",
+    4: "the update was built for a different board",
+    5: "the staged update image is missing or unreadable",
+    6: "the firmware now running does not match the update manifest "
+       "(the bootloader refused or did not complete the install)",
+    7: "the staged update image is not signed by the manufacturer",
+    8: "the update is OLDER than the firmware already installed (rollback refused)",
 }
 
 
@@ -150,6 +169,22 @@ def describe_event(event_type: int, event_result: int, detail_code: int,
 
     if event_type == EVENT_ARMING_BLOCKED:
         return "Arming was blocked by a security check."
+
+    if event_type == EVENT_UPDATE_APPLIED:
+        # detail == "PROMOTED <version>" written by the first-boot promotion.
+        version = detail[len("PROMOTED "):] if detail.startswith("PROMOTED ") else ""
+        if version:
+            return (f"Firmware update {version} was installed and verified - "
+                    "the new firmware is now the certified configuration.")
+        return ("A firmware update was installed and verified - the new "
+                "firmware is now the certified configuration.")
+
+    if event_type == EVENT_UPDATE_APPLY_FAILED:
+        reason = PROMOTE_FAIL_REASON.get(detail_code,
+                                         f"unknown reason code {detail_code}")
+        return (f"A staged firmware update was REFUSED on boot - {reason}; "
+                "the update was quarantined and the previous certified "
+                "configuration is kept.")
 
     return f"Unknown event (type={event_type}, result={event_result})."
 
@@ -256,6 +291,9 @@ def decode_bytes(data: bytes) -> DecodeResult:
 _COVERAGE_ROWS = [
     (EVENT_POST_RESULT,    "POST001/002/003  pre-operational self-test on every boot"),
     (EVENT_UPDATE_ATTEMPT, "UPD001           only manufacturer-signed updates accepted"),
+    (EVENT_UPDATE_APPLIED, "UPD001/ADR-023   verified updates promoted on first boot"),
+    (EVENT_UPDATE_APPLY_FAILED,
+                           "UPD001/ADR-023   unverified staged updates quarantined"),
     (EVENT_PARAM_CHANGE,   "PAR001 / 7.1(c)  certified flight parameters protected"),
     (EVENT_ARMING_BLOCKED, "POST001 gate     arming blocked on integrity failure"),
 ]
