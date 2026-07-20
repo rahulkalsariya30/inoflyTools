@@ -44,7 +44,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-import zlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -53,7 +53,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "tests" / "compliance"))
 
 from tools.checksum.checksum import generate_manifest
 from tools.signer.signer import sign_manifest
-from tools.provisioning.export_manifest import export_binary_manifest
+from tools.provisioning.export_manifest import export_binary_manifest, decode_binary_manifest
 from tools.make_a10_fixtures import make_fixtures
 from test_ADR023_sd_update import build_synthetic_setup
 
@@ -63,12 +63,11 @@ PUBLIC_KEY = PROJECT_ROOT / "pki" / "manufacturer" / "public" / "manufacturer_pu
 BD = "~/PX4-Autopilot/build/px4_sitl_default"   # SITL build dir (WSL side)
 FIX_WSL = "~/a10_sitl_fixtures"                 # fixture copy inside WSL
 
-# security_manifest_t offsets (373-byte binary manifest): created_at u32 at
-# 365, CRC32 over [0:369) at 369. created_at sits OUTSIDE the RSA-signed
-# payload (known gap, format v4 will fold it in), which is exactly what lets
-# us craft the rollback fixture by bumping it and refixing the CRC.
+# security_manifest_t offset (373-byte binary manifest): created_at u32 at 365.
+# Since format v4 created_at is INSIDE the RSA-signed payload, so the rollback
+# fixture (NEWER.BIN) has to be re-signed with the bumped timestamp — a
+# bump-and-refix-CRC edit would (correctly) fail signature verification now.
 _CREATED_AT_OFF = 365
-_CRC_OFF = 369
 
 PASS = 0
 FAIL = 0
@@ -120,12 +119,13 @@ def make_all_fixtures(tmp: Path) -> Path:
     assert len(good) == 373
     (out / "GOOD.BIN").write_bytes(good)
 
-    # NEWER.BIN — created_at +1 day, CRC refixed (rollback fixture)
-    newer = bytearray(good)
-    created_at = struct.unpack_from("<I", newer, _CREATED_AT_OFF)[0]
-    struct.pack_into("<I", newer, _CREATED_AT_OFF, created_at + 86400)
-    struct.pack_into("<I", newer, _CRC_OFF,
-                     zlib.crc32(bytes(newer[:_CRC_OFF])) & 0xFFFFFFFF)
+    # NEWER.BIN — created_at +1 day, RE-SIGNED (rollback fixture). v4 signs
+    # created_at, so the newer timestamp must go through a full re-export.
+    created_at = struct.unpack_from("<I", good, _CREATED_AT_OFF)[0]
+    newer_bundle = decode_binary_manifest(good)
+    newer_bundle["manifest"]["generated_at"] = \
+        datetime.fromtimestamp(created_at + 86400, tz=timezone.utc).isoformat()
+    newer = export_binary_manifest(newer_bundle, PRIVATE_KEY)
     (out / "NEWER.BIN").write_bytes(newer)
 
     # BADMANIFEST.BIN — one payload byte flipped (RSA fails -> corrupt, reason 2)

@@ -118,7 +118,7 @@ class TestPipeline:
         assert len(binary) == TOTAL_SIZE
 
     def test_PIPE_binary_manifest_has_correct_magic(self, fake_px4, temp_keys, tmp_path):
-        """Binary manifest starts with INOFLY03 magic (v3 RSA-2048)."""
+        """Binary manifest starts with INOFLY04 magic (v4: signed created_at)."""
         private_key, public_key = temp_keys
         output_dir = tmp_path / "release"
 
@@ -131,7 +131,7 @@ class TestPipeline:
         )
 
         binary = result.binary_manifest_path.read_bytes()
-        assert binary[:8] == b"INOFLY03"
+        assert binary[:8] == b"INOFLY04"
 
     def test_PIPE_all_artifacts_independently_verifiable(self, fake_px4, temp_keys, tmp_path):
         """Each artifact can be verified independently after pipeline."""

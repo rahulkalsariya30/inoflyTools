@@ -4,11 +4,13 @@ tests/compliance/test_PRV001_export_manifest.py
 Compliance tests for PRV001 — Binary manifest export for drone provisioning
 
 Requirement: PRV001
-  - Binary manifest must be exactly 373 bytes (v3 format with RSA-2048)
-  - Must contain correct magic bytes "INOFLY03"
+  - Binary manifest must be exactly 373 bytes (v4 format with RSA-2048)
+  - Must contain correct magic bytes "INOFLY04"
   - CRC32 must cover all fields except itself
   - RSA-PSS signature must be verifiable with manufacturer public key
-  - Tampered fields must fail verification
+  - Tampered fields must fail verification — INCLUDING created_at, which is
+    inside the signed payload as of v4 (anti-rollback hardening: the FC's
+    apply/promotion checks compare created_at, so it must be unforgeable)
   - Must reject oversized firmware version strings safely
 """
 
@@ -84,9 +86,9 @@ class TestPRV001_BinaryFormat:
     def test_PRV001_starts_with_magic_bytes(self, binary_manifest):
         assert binary_manifest[:8] == MAGIC
 
-    def test_PRV001_format_version_is_3(self, binary_manifest):
+    def test_PRV001_format_version_is_4(self, binary_manifest):
         assert binary_manifest[8] == FORMAT_VERSION
-        assert binary_manifest[8] == 3
+        assert binary_manifest[8] == 4
 
     def test_PRV001_code_hash_is_at_correct_offset(self, sample_bundle, binary_manifest):
         """code_hash starts at byte 9 and is 32 bytes."""
@@ -196,6 +198,23 @@ class TestPRV001_Signature:
         result = verify_binary_manifest(bytes(tampered), keypair["public"])
         assert result is False
 
+    def test_PRV001_tampered_created_at_fails_verification(self, binary_manifest, keypair):
+        """THE v4 gap-closure test: forward-dating created_at (CRC fixed up,
+        as an attacker replaying an old signed manifest would) must now break
+        the RSA signature. Under v3 this exact tamper VERIFIED SUCCESSFULLY,
+        making the A-5 apply / A-6 promotion anti-rollback checks forgeable."""
+        tampered = bytearray(binary_manifest)
+        # created_at is the uint32 at offset 365 — bump it far into the future
+        old_ts = struct.unpack_from("<I", tampered, 365)[0]
+        struct.pack_into("<I", tampered, 365, old_ts + 10 * 365 * 24 * 3600)
+
+        # Attacker can always recompute the CRC — it's not a security boundary
+        new_crc = _compute_crc32(bytes(tampered)[:TOTAL_SIZE - 4])
+        struct.pack_into("<I", tampered, TOTAL_SIZE - 4, new_crc)
+
+        result = verify_binary_manifest(bytes(tampered), keypair["public"])
+        assert result is False
+
     def test_PRV001_corrupted_crc_fails_before_signature_check(self, binary_manifest, keypair):
         """Bad CRC should fail immediately — no need to check signature."""
         tampered = bytearray(binary_manifest)
@@ -223,18 +242,25 @@ class TestPRV001_Signature:
 
 class TestPRV001_SignablePayload:
 
-    def test_PRV001_signable_payload_is_98_bytes(self):
-        payload = _build_signable_payload(b"\xaa" * 32, b"\xbb" * 32, 50, "1.14.0")
-        assert len(payload) == 98
+    def test_PRV001_signable_payload_is_102_bytes(self):
+        """v4 payload: 98 v3 bytes + created_at_le[4]."""
+        payload = _build_signable_payload(b"\xaa" * 32, b"\xbb" * 32, 50, "1.14.0", 1767225600)
+        assert len(payload) == 102
 
     def test_PRV001_signable_payload_is_deterministic(self):
-        p1 = _build_signable_payload(b"\xaa" * 32, b"\xbb" * 32, 50, "1.14.0")
-        p2 = _build_signable_payload(b"\xaa" * 32, b"\xbb" * 32, 50, "1.14.0")
+        p1 = _build_signable_payload(b"\xaa" * 32, b"\xbb" * 32, 50, "1.14.0", 1767225600)
+        p2 = _build_signable_payload(b"\xaa" * 32, b"\xbb" * 32, 50, "1.14.0", 1767225600)
         assert p1 == p2
 
     def test_PRV001_different_code_hash_changes_payload(self):
-        p1 = _build_signable_payload(b"\x00" * 32, b"\xbb" * 32, 50, "1.14.0")
-        p2 = _build_signable_payload(b"\xff" * 32, b"\xbb" * 32, 50, "1.14.0")
+        p1 = _build_signable_payload(b"\x00" * 32, b"\xbb" * 32, 50, "1.14.0", 1767225600)
+        p2 = _build_signable_payload(b"\xff" * 32, b"\xbb" * 32, 50, "1.14.0", 1767225600)
+        assert p1 != p2
+
+    def test_PRV001_different_created_at_changes_payload(self):
+        """v4: the timestamp is part of what gets signed."""
+        p1 = _build_signable_payload(b"\xaa" * 32, b"\xbb" * 32, 50, "1.14.0", 1767225600)
+        p2 = _build_signable_payload(b"\xaa" * 32, b"\xbb" * 32, 50, "1.14.0", 1767225601)
         assert p1 != p2
 
     def test_PRV001_long_version_is_truncated_safely(self, keypair):

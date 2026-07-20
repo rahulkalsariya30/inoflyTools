@@ -131,13 +131,13 @@ class TestPOST001ManifestFormat:
         assert len(binary_manifest) == 373
 
     def test_POST001_magic_bytes(self, binary_manifest):
-        """First 8 bytes must be 'INOFLY03' magic."""
+        """First 8 bytes must be 'INOFLY04' magic."""
         assert binary_manifest[0:8] == MAGIC
 
     def test_POST001_format_version(self, binary_manifest):
-        """Byte 8 must be format version 3 (RSA-2048)."""
+        """Byte 8 must be format version 4 (signed created_at)."""
         assert binary_manifest[8] == FORMAT_VERSION
-        assert binary_manifest[8] == 3
+        assert binary_manifest[8] == 4
 
     def test_POST001_signature_is_256_bytes(self, binary_manifest):
         """RSA-2048 signature must be exactly 256 bytes."""
@@ -152,16 +152,18 @@ class TestPOST001ManifestFormat:
         computed_crc = _compute_crc32(binary_manifest[:369])
         assert stored_crc == computed_crc
 
-    def test_POST001_signable_payload_is_98_bytes(self, binary_manifest):
-        """The signable payload (code_hash + data_hash + board_id + version)
-        must be exactly 98 bytes — matching _build_signable_payload in C++."""
+    def test_POST001_signable_payload_is_102_bytes(self, binary_manifest):
+        """The signable payload (code_hash + data_hash + board_id + version
+        + created_at) must be exactly 102 bytes — matching
+        _build_signable_payload in C++ (v4: created_at is signed)."""
         code_hash = binary_manifest[9:9+32]
         data_hash = binary_manifest[41:41+32]
         board_id = struct.unpack("<H", binary_manifest[331:333])[0]
         version = binary_manifest[333:333+32]
+        created_at = binary_manifest[365:369]
 
-        payload = code_hash + data_hash + struct.pack("<H", board_id) + version
-        assert len(payload) == 98
+        payload = code_hash + data_hash + struct.pack("<H", board_id) + version + created_at
+        assert len(payload) == 102
 
 
 # ── Tests: POST001 — CRC32 Verification ─────────────────────────────────────

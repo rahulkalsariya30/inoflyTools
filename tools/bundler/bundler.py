@@ -24,7 +24,7 @@ BUNDLE FORMAT:
     firmware.px4          — the firmware binary (copy of the original .px4)
     signed_manifest.json  — signed manifest from Phase 1.3 (signer.py)
     update_manifest.bin   — 373-byte security_manifest_t for UPD001 flow
-                            (RSA-PSS-signed over the 98-byte fixed payload;
+                            (RSA-PSS-signed over the 102-byte fixed payload;
                             uploaded to the FC's SD card and verified by
                             FirmwareUpdateGatekeeper). See security_manifest.h.
     firmware_update.bin   — (hardware bundles only, v1.2+) the raw signed
@@ -40,7 +40,7 @@ WHY two manifests?
   signed_manifest.json    is JSON, signed over canonicalized JSON bytes.
                           Used by QGC for client-side authenticity check.
   update_manifest.bin     is the fixed-layout binary the FC's gatekeeper
-                          reads. Its signature covers a 98-byte payload
+                          reads. Its signature covers a 102-byte payload
                           (code_hash + data_hash + board_id + version), NOT
                           the JSON bytes. The drone never parses JSON; the
                           bundler bakes the binary form so QGC just FTPs it.
@@ -266,7 +266,7 @@ def create_bundle(
         bundle_info["update_image"] = update_meta
 
     # Build the binary security_manifest_t the FC's FirmwareUpdateGatekeeper reads.
-    # This is a separate RSA-PSS signature over the 98-byte fixed-layout payload
+    # This is a separate RSA-PSS signature over the 102-byte fixed-layout payload
     # (code_hash + data_hash + board_id + version) — distinct from the JSON
     # manifest's signature, which is over the canonicalized JSON. The drone
     # never parses JSON; this binary is what gets FTP-uploaded by QGC during

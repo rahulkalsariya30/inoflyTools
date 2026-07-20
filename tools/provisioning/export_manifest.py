@@ -17,17 +17,26 @@ WHY re-sign in binary format?
   The embedded verifier cannot reproduce canonical JSON. So this tool
   creates a separate signature over a deterministic binary payload:
 
-    signable_payload = code_hash[32] + data_hash[32] + board_id[2] + version[32]
-                     = 98 bytes, always in this exact order
+    signable_payload = code_hash[32] + data_hash[32] + board_id[2]
+                     + version[32] + created_at[4]
+                     = 102 bytes, always in this exact order
 
-  The embedded side reconstructs this same 98-byte payload from the struct
+  The embedded side reconstructs this same 102-byte payload from the struct
   fields and verifies the RSA-PSS signature.
+
+WHY created_at is inside the signature (v4):
+  The FC's apply (A-5) and promotion (A-6) anti-rollback checks compare the
+  staged manifest's created_at against the active one. In v3 created_at was
+  covered only by CRC32 — an attacker replaying an old signed manifest could
+  forward-date it (recompute CRC, signature still valid) and beat the
+  rollback check. v4 folds created_at into the signed payload, so any
+  timestamp edit invalidates the manufacturer signature.
 
 BINARY MANIFEST FORMAT (security_manifest_t — 373 bytes):
   Offset  Size  Field
   ------  ----  -----
-       0     8  magic        "INOFLY03" — format identifier (v3 for RSA-2048)
-       8     1  format_ver   struct layout version (currently 3)
+       0     8  magic        "INOFLY04" — format identifier (v4: signed created_at)
+       8     1  format_ver   struct layout version (currently 4)
        9    32  code_hash    SHA-256 of firmware binary
       41    32  data_hash    SHA-256 of default parameter set
       73   256  signature    RSA-2048 PSS signature (always exactly 256 bytes)
@@ -59,8 +68,8 @@ PROJECT_ROOT     = Path(__file__).resolve().parent.parent.parent
 PRIVATE_KEY_PATH = PROJECT_ROOT / "pki" / "manufacturer" / "private" / "manufacturer_private.pem"
 
 # Binary format constants
-MAGIC           = b"INOFLY03"   # 8 bytes — v3 for RSA-2048 manifest format
-FORMAT_VERSION  = 3             # v3: RSA-2048 signatures
+MAGIC           = b"INOFLY04"   # 8 bytes — v4: created_at inside signed payload
+FORMAT_VERSION  = 4             # v4: signed created_at (anti-rollback hardening)
 HASH_LEN        = 32            # SHA-256 output size
 SIG_MAX_LEN     = 256           # RSA-2048 signature size (2048/8 = 256 bytes, always exact)
 VERSION_LEN     = 32            # firmware version string buffer size
@@ -77,24 +86,32 @@ assert struct.calcsize(STRUCT_FORMAT) == TOTAL_SIZE, \
 
 
 def _build_signable_payload(code_hash: bytes, data_hash: bytes,
-                             board_id: int, version: str) -> bytes:
+                             board_id: int, version: str,
+                             created_at: int) -> bytes:
     """
-    Build the 98-byte payload that gets signed and later verified on the drone.
+    Build the 102-byte payload that gets signed and later verified on the drone.
 
     WHY this specific layout?
       Fixed-length fields, fixed order — the embedded C code reconstructs
-      this exact sequence from the struct and passes it to ecc_verify_hash_ex().
-      Any change here must be mirrored in FirmwareIntegrityChecker.cpp.
+      this exact sequence from the struct and passes it to the RSA-PSS
+      verifier. Any change here must be mirrored in
+      FirmwareIntegrityChecker.cpp _build_signable_payload().
+
+    WHY created_at is included (v4):
+      The FC compares staged vs active created_at for anti-rollback (A-5/A-6).
+      Signing it makes the timestamp unforgeable.
 
     Returns:
-        98 bytes: code_hash[32] + data_hash[32] + board_id_le[2] + version_padded[32]
+        102 bytes: code_hash[32] + data_hash[32] + board_id_le[2]
+                 + version_padded[32] + created_at_le[4]
     """
     board_id_bytes   = struct.pack("<H", board_id)          # 2 bytes, little-endian
     version_bytes    = version.encode("utf-8")[:VERSION_LEN-1]  # max 31 chars + null
     version_padded   = version_bytes.ljust(VERSION_LEN, b"\x00")  # pad to 32 bytes
+    created_at_bytes = struct.pack("<I", created_at)        # 4 bytes, little-endian
 
-    payload = code_hash + data_hash + board_id_bytes + version_padded
-    assert len(payload) == 98, f"Payload size wrong: {len(payload)}"
+    payload = code_hash + data_hash + board_id_bytes + version_padded + created_at_bytes
+    assert len(payload) == 102, f"Payload size wrong: {len(payload)}"
     return payload
 
 
@@ -130,7 +147,7 @@ def export_binary_manifest(
 
     This is the main function. It:
       1. Extracts code_hash and data_hash from the bundle (hex → bytes)
-      2. Builds the 98-byte signable payload
+      2. Builds the 102-byte signable payload (created_at included, v4)
       3. Signs the payload with the private key (RSA-PSS signature)
       4. Packs everything into the binary struct
       5. Appends CRC32 over the entire struct (excluding CRC field)
@@ -165,8 +182,8 @@ def export_binary_manifest(
     except (ValueError, OSError):
         created_at = 0
 
-    # Build signable payload and sign it
-    payload = _build_signable_payload(code_hash, data_hash, board_id, version)
+    # Build signable payload and sign it (v4: created_at is inside the signature)
+    payload = _build_signable_payload(code_hash, data_hash, board_id, version, created_at)
     sig = _sign_binary_payload(payload, private_key_path)
 
     if len(sig) != SIG_MAX_LEN:
@@ -235,9 +252,9 @@ def verify_binary_manifest(binary_manifest: bytes, public_key_path: Path) -> boo
     if magic != MAGIC:
         return False
 
-    # Step 3: Reconstruct signable payload
+    # Step 3: Reconstruct signable payload (v4 includes created_at)
     version_str = version_padded.rstrip(b"\x00").decode("utf-8", errors="replace")
-    payload = _build_signable_payload(code_hash, data_hash, board_id, version_str)
+    payload = _build_signable_payload(code_hash, data_hash, board_id, version_str, created_at)
 
     # Step 4: Verify RSA-PSS signature
     sig = bytes(sig_bytes[:sig_len])
@@ -281,7 +298,7 @@ def decode_binary_manifest(binary_manifest: bytes) -> dict:
      board_id, version_padded, created_at, _crc) = struct.unpack(STRUCT_FORMAT, binary_manifest)
 
     if magic != MAGIC:
-        raise ValueError(f"bad magic {magic!r}; not an INOFLY03 manifest")
+        raise ValueError(f"bad magic {magic!r}; not an {MAGIC.decode()} manifest")
 
     version_str  = version_padded.rstrip(b"\x00").decode("utf-8", errors="replace")
     generated_at = datetime.fromtimestamp(created_at, tz=timezone.utc).isoformat()
