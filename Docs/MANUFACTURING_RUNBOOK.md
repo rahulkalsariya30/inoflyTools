@@ -178,12 +178,28 @@ Time estimate: ~30 minutes per unit once Pre-flight is settled.
   confirmed install (one-shot use).
 
 > **Important.** From this step onward, the unit's sector 0 contains our
-> secure bootloader (BOOT001 + BOOT005 + embedded manufacturer pubkey).
-> DFU mode is now software-refused; `bl_update` is the only sector-0
-> write path; SWD is still open until the seal is applied in Step 8.
+> secure bootloader (BOOT001 + ~~BOOT005 +~~ embedded manufacturer pubkey
+> + the ADR-023 SD-staged update path). ~~DFU mode is now software-refused;~~
+> ⚠️ *Corrected 2026-07-16: BOOT005 DFU-refuse ships **default OFF**
+> (ADR-024) — the QGC/DFU loop remains available as recovery; enabling the
+> refuse gate is a separate build decision validated by B10.* `bl_update` and
+> the BL's own verified SD apply are the only sector-0/app write paths; SWD
+> is still open until the seal is applied in Step 8.
 > Because the bootloader is no longer field-updatable via OTA (ADR-022),
 > a future bootloader change requires this same SD one-shot under a
 > broken-seal RMA.
+>
+> ⭐ **NEW 2026-07-16 (ADR-023 executed).** The production bootloader build
+> now includes the SD-staged app-fw update path (`CONFIG_BOOTLOADER_SD_UPDATE`):
+> on every boot it probes the SD root for `UPDATE.BIN` and, **only after
+> RSA-PSS-verifying it against the embedded manufacturer pubkey**, flashes it.
+> Two operational consequences: (1) after any bootloader **source** change,
+> the artifact must be **rebuilt then re-signed** (`sign_bootloader.py` /
+> `pipeline.py::sign_bootloader_image` — the signature covers the embedded
+> TOC, so the old `.bin` cannot be re-signed in place) before it lands in
+> `bootloader_artifact/`; (2) app-fw field updates on sealed units now go
+> through the signed SD path (QGC → `apply_update` → reboot → BL applies) —
+> no seal break needed for app firmware.
 
 ### Step 5 — Verify secure bootloader hash
 

@@ -1,7 +1,9 @@
 # Drone Security Compliance Plan
 # DGCA UAS Type Certification — Level 1 (Firmware Manufacturer)
 
-Last updated: 2026-05-04
+Last updated: 2026-07-16 (UPD001 on-device apply path + BOOT005
+implemented-default-OFF + manifest format v4 — ADR-023 executed; header
+amendment notice below is the 2026-05-04 architecture pivot, still current)
 
 > **🟡 PARTIALLY AMENDED — 2026-05-04 (architecture pivot).** The
 > Phase 5b plan was originally OTP-pubkey + RDP Level 2 burn
@@ -19,6 +21,17 @@ Last updated: 2026-05-04
 > describing what we are actually doing. This preserves traceability —
 > a reviewer can see what was retired, what replaced it, and why. The
 > same convention is used in `Docs/ARCHITECTURE.md`.
+>
+> ⚠️ **Reading rule (ADR-024, 2026-06-05; implementation 2026-07-15).**
+> Wherever this document lists **BOOT005** (software DFU-refuse) as a
+> load-bearing control, read: **the tamper seal (BOOT007) is what closes
+> Path A** on our airframe (USB sits inside the seal); BOOT005 is
+> defense-in-depth — implemented inside ADR-023 as
+> `CONFIG_BOOTLOADER_REFUSE_DFU`, shipping **default OFF**. Likewise,
+> per ADR-022 (2026-05-24) the secure bootloader is **no longer bundled
+> in the app-fw ROMFS** — it is a signed artifact installed from SD via
+> `bl_update` (and since ADR-025/BOOT008 that install is itself
+> signature-verified before erase).
 
 ---
 
@@ -62,10 +75,14 @@ factory seal.
 - Bootloader integrity is provided by:
   1. **Bootstrap-trust:** the only path that writes sector 0 is
      `bl_update`, initiated from a *running, manufacturer-signed* app
-     fw whose ROMFS contains the signed bootloader image (BOOT006).
-  2. **Software DFU-refuse:** the secure bootloader refuses to enter
+     fw ~~whose ROMFS contains the signed bootloader image~~ *(ADR-022:
+     the signed bootloader artifact is staged on SD, not in ROMFS;
+     ADR-025/BOOT008: `bl_update` RSA-PSS-verifies it before erasing)*
+     (BOOT006).
+  2. ~~**Software DFU-refuse:** the secure bootloader refuses to enter
      DFU mode (BOOT005), so an attacker with USB cannot route around
-     `bl_update`.
+     `bl_update`.~~ *(ADR-024: defense-in-depth, ships OFF — the seal,
+     item 3, is what blocks USB access; see the reading rule above.)*
   3. **Tamper-evident sealing:** airframe + Cube enclosure are sealed
      with serialized seals before shipping (BOOT007); reaching SWD/JTAG
      to bypass `bl_update` requires visibly breaking the seal.
@@ -97,7 +114,7 @@ factory seal.
 | ~~BOOT002~~ | ~~Manufacturer public key in STM32 OTP (hardware-locked)~~ ⚠️ **RETIRED 2026-05-04 (ADR-013).** ✅ **CURRENT:** pubkey is embedded in the bootloader binary; OTP is not used. | ~~Root of Trust~~ | 🚫 Retired |
 | ~~BOOT003~~ | ~~RDP Level 2 burn — chip-level DFU/debug lockdown~~ ⚠️ **RETIRED 2026-05-04 (ADR-013).** ✅ **CURRENT:** Path A is closed by software DFU-refuse (BOOT005); SWD/JTAG access is gated by tamper-evident sealing (BOOT007). | ~~Tamper Resist~~ | 🚫 Retired |
 | BOOT004| Flash encryption (AES) — productization / Level 2/3 only         | Confidentiality | ⏳ Deferred (ADR-004) |
-| BOOT005| ~~Software DFU-refuse in the secure bootloader (closes Path A)~~ → defense-in-depth; seal closes Path A (ADR-024) | Secure Boot | ➖ Deferred into ADR-023 (not a Phase 5b gate) |
+| BOOT005| ~~Software DFU-refuse in the secure bootloader (closes Path A)~~ → defense-in-depth; seal closes Path A (ADR-024) | Secure Boot | ✅ Implemented in ADR-023 (2026-07-15, `CONFIG_BOOTLOADER_REFUSE_DFU` **default OFF**; B10 bench pending; not a Phase 5b gate) |
 | BOOT006| `bl_update` / ROMFS-bundled secure bootloader (install path; bootstrap-trust root) | Secure Boot | ⏳ Planned (Phase 5b) |
 | BOOT007| Tamper-evident sealing + STM32 96-bit UID + seal-serial tracking (compensating control for the physical-attacker class) | Tamper Resist | ⏳ Planned (Phase 5b) |
 
@@ -266,6 +283,42 @@ Events logged:
 The flight controller verifies the manufacturer signature on a firmware
 bundle before accepting a flash operation. Any unsigned or wrongly-signed
 firmware is rejected at the drone level (not just at the QGC level).
+
+⭐ **NEW 2026-07-16 — on-device apply path (ADR-023, executed).** UPD001
+originally covered *verification* only (`secure_boot verify_update` authorizes
+a staged manifest; the image itself was flashed by QGC's standard upload).
+The signed update now **applies end-to-end on the device** through three
+independent gates:
+
+1. **`secure_boot apply_update` (app fw):** staged manifest CRC32 + RSA-PSS +
+   board_id (the original UPD001 checks) **plus** anti-rollback (staged
+   manifest `created_at` older than active ⇒ reject) **plus** hash binding —
+   a streamed SHA-256 pass over the staged image (`/fs/microsd/UPDATE.BIN`)
+   whose code/data region digests must equal the RSA-verified manifest's
+   `code_hash`/`data_hash` — plus an RSA-PSS spot check of the image's
+   embedded signature. Reject reasons 5 IMAGE_MISSING / 6 IMAGE_HASH_MISMATCH
+   / 7 IMAGE_SIG_INVALID / 8 ROLLBACK; every attempt audit-logged.
+2. **Secure bootloader SD gate:** on every boot the bootloader re-verifies
+   the staged image's RSA-PSS signature against the embedded manufacturer
+   pubkey **before erasing anything**, applies torn-write-safe (first
+   vector-table word committed last), and auto-retries across power loss.
+   The bootloader mounts the SD **read-only** — cleanup is app-owned.
+3. **First-boot promotion + POST:** `promoteAfterUpdate()` promotes the
+   staged manifest to active only if it verifies, is not a rollback, and the
+   flash actually matches it (`matchesRunningFirmware`); success/failure =
+   audit events 5 `UPDATE_APPLIED` / 6 `UPDATE_APPLY_FAILED` (failure
+   quarantines the image as `UPDATE.BAD`). POST then gates arming as always.
+
+**Anti-rollback hardening (manifest format v4, 2026-07-16):** `created_at`
+is now **inside the manifest's RSA-signed payload** (magic `INOFLY04`,
+signable payload 98 → 102 bytes) — previously it was CRC-only and the
+rollback comparison was forgeable. The bootloader path retains the documented
+rollback residual (no version counter in the trust root; THREAT_MODEL T14),
+but a BL-path downgrade fails closed: promotion refuses, POST fails against
+the rolled-back flash, arming stays blocked.
+
+Full mechanism, bench evidence (B9 matrix incl. power-loss recovery), and
+rationale: [Docs/ARCHITECTURE.md ADR-023](Docs/ARCHITECTURE.md).
 
 ### PAIR001 — GCS-FC pairing via MAVLink signing (the audited reference Section 3.2.4)
 Only authorized GCS software can communicate with the drone. Implemented
@@ -488,7 +541,12 @@ added for productization or Level 2/3 parity. See ADR-004 in
 
 > ⚠️ **AMENDED 2026-06-05 ([ADR-024](Docs/ARCHITECTURE.md)) — read first.**
 > BOOT005 is **reclassified from a load-bearing Path-A closure to
-> defense-in-depth**, is **not implemented**, and is **deferred into ADR-023**.
+> defense-in-depth**, ~~is **not implemented**,~~ and is **deferred into
+> ADR-023**. ✅ **UPDATE 2026-07-15: implemented there** (work package A-7,
+> `CONFIG_BOOTLOADER_REFUSE_DFU`, default OFF, compiled out when off; the
+> refusal jumps to the verified app before USB enumerates, and the SD-staged
+> update path runs first so a healthy unit stays updatable — the exact
+> precondition below. Hardware matrix = BOOTLOADER_BRINGUP B10, pending).
 > Three corrections to everything below: **(1)** On our airframe USB sits
 > *inside* the tamper seal, so a USB/DFU attacker is already a seal-breaker who
 > has SWD and bypasses both BOOT001 and BOOT005 — **the tamper seal (BOOT007),
@@ -509,11 +567,20 @@ without RDP Level 2, which we cannot burn (BOOT003 retired). Instead,
 the **secure (signed) variant of the PX4 bootloader** contains a
 software check that **refuses to enter DFU mode**.
 
-**Mechanism (planned, ArduPilot pattern).** A build-time flag
-`#define INOFLY_SECURE_BL` guards a compile-time refusal that returns
-immediately from the DFU-entry decision point in the PX4 bootloader.
-The flag is set in the production bootloader build target and unset
-in dev builds.
+**Mechanism ~~(planned, ArduPilot pattern)~~ (✅ as implemented 2026-07-15).**
+~~A build-time flag `#define INOFLY_SECURE_BL` guards a compile-time refusal
+that returns immediately from the DFU-entry decision point in the PX4
+bootloader.~~ Kconfig **`CONFIG_BOOTLOADER_REFUSE_DFU`** (default **n**)
+guards a hook after the bootloader's boot-request checks: when no
+bootloader-entry request is pending, the BL jumps straight to the
+signature-verified app **before USB is initialized** — the upload loop is
+never reachable and USB never enumerates. `jump_to_app` performs the full
+BOOT001 verify and returns only if no validly-signed app exists, in which
+case the upload loop stays available as recovery (fail-open for a bricked
+unit, by design). The SD-staged update path (ADR-023) runs before the jump.
+A configure-time check refuses to build the refuser without PX4_CRYPTO
+(fail-closed: a non-verifying refuser is unbuildable). Compiled out when
+off — bootloader size delta is zero.
 
 **Why this works as Path A closure.**
 - An attacker with USB access cannot enter DFU because the running
@@ -837,8 +904,10 @@ tests/
     test_POST001_power_on_self_test.py
     test_UPD001_secure_update.py
     test_BOOT001_toc_sign_verify.py    BOOT001 — TOC-aware signer round-trip + tamper tests
+    test_ADR023_sd_update.py           ADR-023 — staged-image TOC/sig/meta reject matrix + bundler v1.2 round-trip
   integration/      Integration tests (requires WSL2 + SITL)
     test_sitl_e2e.py
+    test_sitl_apply_update.py          ADR-023 — apply/promotion SITL matrix (manual-run, 44 checks)
 
 Docs/
   ARCHITECTURE.md                  Canonical architecture reference (LOCKED 2026-04-29; partially amended 2026-05-04)

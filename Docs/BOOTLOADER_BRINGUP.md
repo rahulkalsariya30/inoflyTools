@@ -359,15 +359,18 @@ mechanic — BOOT008 requires it to be signed, which it is). Wall power.
 | # | Test | Stage on SD | Expect |
 |---|---|---|---|
 | B9.1 | ALREADY_APPLIED (idempotence) | `UPDATE.BIN` identical to the running fw | Boot proceeds normally (one extra ~2–3 s hash pass); no erase; POST green; file left in place |
-| B9.2 | APPLIED (the real update) | `UPDATE.BIN` = a *different* signed fw build **+ its matching `manifest.bin`** in `inofly/` (promotion is A-6; until then copy the manifest manually like BP3) | Solid LED during erase (~10–20 s), flicker during write; new app boots; POST green against the new manifest |
+| B9.2 | APPLIED (the real update) | `UPDATE.BIN` = a *different* signed fw build **+ its matching `manifest.bin`** in `inofly/` ~~(promotion is A-6; until then copy the manifest manually like BP3)~~ ✅ *A-6 landed 2026-07-15: on a re-run, stage the manifest as `inofly/update_manifest.bin` (+ `UPDATE.MTA` at root) and let first-boot promotion rename/clean up — the manual copy was the pre-A-6 workaround used in the 2026-07-09 run; B10.3 exercises the promotion flow* | Solid LED during erase (~10–20 s), flicker during write; new app boots; POST green against the new manifest |
 | B9.3 | REFUSED (tampered) | `UPDATE.BIN` with 1 byte flipped inside the signed range | Old app boots normally; flash untouched; file left in place |
 | B9.4 | REFUSED (wrong key) | attacker-key-signed image (reuse the B8 fixture recipe) | Same as B9.3 — refuses on authenticity, not structure |
 | B9.5 | NO_FILE (baseline) | no `UPDATE.BIN` | Boot behavior identical to pre-A-4 (fast probe fail-out) |
 | B9.6 | power-loss retry (stretch) | B9.2 setup; pull power mid-write (LED flickering) | Next boot re-verifies from SD and re-applies; new app boots. Torn image can't run: first vector-table word is committed last, so BOOT001/`jump_to_app` refuse until a full apply completes |
 
-Cleanup after the matrix: delete `UPDATE.BIN` from the card (app-side
-deletion/quarantine is A-6). Note the update-intent reboot from QGC is A-5;
-on the bench a plain reboot suffices — the bootloader probes every boot.
+Cleanup after the matrix: delete `UPDATE.BIN` from the card ~~(app-side
+deletion/quarantine is A-6)~~ *(A-6 promotion now deletes/quarantines it
+automatically when the staged manifest is present; manual delete only if you
+staged the image alone)*. Note the update-intent reboot from QGC is A-5's
+`secure_boot apply_update --reboot` (landed 2026-07-09); on the bench a plain
+reboot suffices — the bootloader probes every boot.
 
 **Bench findings (2026-07-09, matrix executed same day):**
 - 🔴 **B9.6 found a real bug — H7 flash-ECC crash loop (FIXED, PX4

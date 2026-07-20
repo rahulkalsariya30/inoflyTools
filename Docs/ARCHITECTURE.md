@@ -725,9 +725,12 @@ must be gated.
   bytes over USB. SWD remains blocked operationally by the tamper-evident
   seal (out-of-scope physical attacker class).
 - ⚠️ **AMENDED 2026-06-05 ([ADR-024](#adr-024--boot005-dfu-refuse-reclassified-to-defense-in-depth-deferred-into-adr-023-2026-06-05-amends-adr-014)).**
-  Two corrections: (1) this DFU-refuse (**BOOT005**) is **not implemented**
-  and is **deferred into ADR-023** (it cannot be enabled until app-fw
-  self-reflash exists). (2) Calling it the closure of Path A is **overstated**:
+  Two corrections: (1) this DFU-refuse (**BOOT005**) is ~~**not implemented**
+  and is~~ **deferred into ADR-023** (it cannot be enabled until app-fw
+  self-reflash exists) — ✅ *since 2026-07-15 it IS implemented there
+  (`CONFIG_BOOTLOADER_REFUSE_DFU`, default OFF; B10 bench pending), the
+  precondition having been met by ADR-023's SD-staged update path*.
+  (2) Calling it the closure of Path A is **overstated**:
   because USB is *inside* the tamper seal, a USB/DFU attacker is already a
   seal-breaker who has SWD and bypasses both BOOT001 and BOOT005 — so for this
   airframe **the seal is what closes Path A**, and BOOT005 is defense-in-depth
@@ -752,8 +755,9 @@ must be gated.
 
 | Path | Gated by (today, pre-Phase-5b) | Gated by (post-Phase-5b) |
 |---|---|---|
-| Path A (DFU) | Nothing — OPEN GAP | BOOT001 (firmware refuses to launch) + **tamper seal** (USB/SWD behind it — the actual control) + ~~BOOT003 (DFU dead)~~ ~~✅ ADR-014 software DFU-refuse~~ → **defense-in-depth, deferred into ADR-023 ([ADR-024](#adr-024--boot005-dfu-refuse-reclassified-to-defense-in-depth-deferred-into-adr-023-2026-06-05-amends-adr-014))** |
+| Path A (DFU) | Nothing — OPEN GAP | BOOT001 (firmware refuses to launch) + **tamper seal** (USB/SWD behind it — the actual control) + ~~BOOT003 (DFU dead)~~ ~~✅ ADR-014 software DFU-refuse~~ → **defense-in-depth, deferred into ADR-023 ([ADR-024](#adr-024--boot005-dfu-refuse-reclassified-to-defense-in-depth-deferred-into-adr-023-2026-06-05-amends-adr-014))** — ⭐ *implemented there 2026-07-15 (`CONFIG_BOOTLOADER_REFUSE_DFU`, ships OFF)* |
 | Path B (MAVLink-FTP) | UPD001 (QGC + FC verify) | UPD001 + BOOT001 (bootloader re-verify) |
+| SD staged update (⭐ NEW 2026-07-16, ADR-023 — the sanctioned self-update route, and therefore also an attack surface: THREAT_MODEL T15) | — (did not exist) | Triple-gated: `apply_update` (UPD001 checks + `created_at` anti-rollback + image↔manifest hash binding) → bootloader RSA-PSS **verify-before-erase** vs embedded pubkey → first-boot promotion (`matchesRunningFirmware` + anti-rollback) + POST |
 
 After Phase 5b, **every byte of code the CPU executes was signed by
 the manufacturer's RSA-2048 private key**, regardless of which path
@@ -768,6 +772,12 @@ delivered it.
 > bootloader's tamper-evident-sealing argument: external writes are
 > blocked by software DFU-refuse + sealing, internal writes (from
 > running signed app fw) are how updates legitimately happen.
+> ⚠️ *Per ADR-024 (2026-06-05), read "software DFU-refuse" throughout
+> this section as: the **seal** blocks external USB/SWD access; BOOT005
+> is defense-in-depth, implemented 2026-07-15 but shipping **default
+> OFF**. Since ADR-023 (2026-07-16) the legitimate internal write is the
+> SD-staged apply: the bootloader itself re-verifies the staged image's
+> RSA-PSS signature before erasing.*
 
 A common question: ~~"If RDP L2 blocks all flash writes, how do
 firmware updates get installed?"~~ ✅ **"If DFU is refused and SWD is
@@ -784,7 +794,7 @@ signature-verified.**
 
 | Who's writing | Mechanism | Blocked under ADR-013/014? |
 |---|---|---|
-| Host PC via DFU bootloader (`dfu-util` etc.) | External — USB → ROM bootloader → flash peripheral | ✅ Yes — secure bootloader software-refuses DFU mode entry (ADR-014); ROM DFU loader is never invoked |
+| Host PC via DFU bootloader (`dfu-util` etc.) | External — USB → ROM bootloader → flash peripheral | ✅ Yes — ~~secure bootloader software-refuses DFU mode entry (ADR-014); ROM DFU loader is never invoked~~ → per ADR-024 the **tamper seal** blocks USB access; BOOT005 refuse-gate is DiD (implemented 2026-07-15, ships OFF) |
 | Debug probe via SWD/JTAG | External — debug interface → flash peripheral | ✅ Yes — out-of-scope physical attacker; tamper-evident seal must be visibly broken to reach SWD pads |
 | Running PX4 firmware writing to flash | Internal — CPU executes flash-write instructions on the FLASH peripheral | ❌ No, allowed — but the running firmware is itself sig-verified by the bootloader on every boot, so an attacker can't get malicious code into this position |
 
@@ -1512,9 +1522,11 @@ security architecture as ArduPilot" story for the auditor.
 > BOOT005 is **reclassified from load-bearing Path-A closure to
 > defense-in-depth** (USB is behind the tamper seal, so a USB/DFU attacker is
 > already a seal-breaker with SWD, which bypasses both BOOT001 and BOOT005 —
-> the seal is the real control). It is **not implemented**, is **deferred into
+> the seal is the real control). It ~~is **not implemented**,~~ is **deferred into
 > ADR-023** (it cannot be switched on until app-fw self-reflash exists, else a
-> healthy unit becomes un-updatable over USB), and the "ROM DFU loader" wording
+> healthy unit becomes un-updatable over USB) — ✅ *implemented there 2026-07-15
+> (A-7, `CONFIG_BOOTLOADER_REFUSE_DFU`, default OFF; the SD-staged update path
+> satisfied the precondition)* — and the "ROM DFU loader" wording
 > below should be read as the **PX4 `px_uploader` upload loop**. The mechanism
 > described here stays the eventual implementation; only its criticality and
 > sequencing change. Read ADR-024 first.
@@ -2652,13 +2664,17 @@ ADR-015 to "superseded by ADR-022."
 
 ---
 
-### ADR-023 — Auto-flash-after-verify via app-fw-orchestrated self-reflash (2026-06-05, PROPOSED — design draft, not executed)
+### ADR-023 — Auto-flash-after-verify via app-fw-orchestrated self-reflash (2026-06-05 PROPOSED → 2026-07-02 ACCEPTED, mechanism amended → 2026-07-16 EXECUTED, device side)
 
-**Status:** 📝 **PROPOSED — design draft 2026-06-05. No code. No firmware
-change yet.** Records the decision *direction* and, more importantly, the
-*binding safety requirement* so that whoever implements it cannot skip it.
-Mechanism selection is left open pending two prerequisites (see "Open
-questions"). Do not treat any sub-mechanism below as chosen.
+**Status:** ✅ **EXECUTED (device side) 2026-07-16.** Mechanism decided and
+plan approved 2026-07-02 (amending the open-mechanism draft below); implemented
+and hardware-validated through work packages A-1…A-8/A-10 (bench matrix **B9
+full PASS on hardware 2026-07-09**, including power-loss recovery). Remaining:
+A-11 QGC-side flow + H16/H17 hardware acceptance (tracked in
+[HARDWARE_ACCEPTANCE.md](HARDWARE_ACCEPTANCE.md)) and the B10 BOOT005 bench
+matrix. The original 2026-06-05 draft is preserved below for traceability;
+its "mechanism OPEN, none selected" framing is ~~superseded~~ — see the
+**EXECUTED record** at the end of this section for what was actually built.
 
 **Context — what exists today.** The signed-update story is verified but
 not *applied* on-device. `secure_boot verify_update`
@@ -2712,9 +2728,10 @@ prevent. The current `.fwbundle` / staging format carries only the manifest;
 it must be extended to carry (or FTP-stage) the image, and `verify_update`
 (or a new `apply_update`) must add the image↔manifest hash binding.
 
-**Mechanism — OPEN, must be verified against PX4 source before execution.**
-The app fw executes *from* the internal flash it would need to erase, so this
-is not a naive `write()`. Candidates, none selected here:
+**Mechanism — ~~OPEN, must be verified against PX4 source before execution~~
+(✅ RESOLVED 2026-07-02: Candidate A chosen, with SD staging — see EXECUTED
+record below).** The app fw executes *from* the internal flash it would need
+to erase, so this is not a naive `write()`. Candidates as drafted:
 
 | Candidate | Sketch | Risk / unknown |
 |---|---|---|
@@ -2750,7 +2767,13 @@ code/data hash split and manifest format semantics; UPD001 manifest
 verification (CRC + RSA-PSS + board_id); `UPDATE_ATTEMPT` audit logging. This
 ADR *adds* an apply step after verification; it removes no existing check.
 
-**Open questions / TODO before this can move from PROPOSED → EXECUTED.**
+**Open questions / TODO before this can move from PROPOSED → EXECUTED**
+*(✅ all five resolved by the 2026-07-02 decision + execution — (1) mechanism A
+via SD staging, dual-bank ruled out on bank size; (2) `UPDATE.BIN`/`UPDATE.MTA`
+at SD root, bundler v1.2; (3) hash binding in `applyUpdate` +
+`test_ADR023_sd_update.py`; (4) quarantine/audit events 5 & 6; (5) executed
+after Phase 5b bootloader, deployed via signed `bl_update` — see EXECUTED
+record).*
 1. Confirm the CubeOrange+ flash self-write capability against PX4 source
    (dual-bank? bootloader-mediated only?) — decides mechanism A/B/C.
 2. Extend the staged-update format to carry the firmware **image**, not just
@@ -2771,13 +2794,128 @@ ADR *adds* an apply step after verification; it removes no existing check.
   This ADR is a usability/operability improvement, not a compliance gap
   closure — which is why it is PROPOSED, not urgent.
 
+---
+
+#### ✅ EXECUTED record (mechanism decided 2026-07-02; device side complete 2026-07-16)
+
+**Mechanism chosen: Candidate A, amended — reboot-to-bootloader + SD-card
+staging.** The app fw verifies and stages; the **secure bootloader** performs
+the erase/write, streaming the staged image from SD and re-verifying its
+RSA-PSS signature against the keystore slot-0 manufacturer pubkey **before
+erasing a single byte**. Prior art: ArduPilot ships exactly this shape on
+H743 (`.abin` + MD5); we use the full RSA-PSS chain instead. The other
+candidates died on facts: **B (dual-bank)** — the app image (~1.87 MB)
+exceeds the 1 MB bank, so bank-swap cannot hold it; **C (RAM flasher)** —
+bank-1 (~896 KB) cannot be buffered in RAM and the SD/FAT code needed for
+recovery lives in the flash being erased. The draft's objection to A ("under
+the factory bootloader the write is unsigned-accepting") was retired by
+sequencing: ADR-025/BOOT008 signed `bl_update` is the deployment path for the
+SD-capable secure bootloader, so the applier only ever ships where BOOT001
+already backstops it — the draft's own recommendation, honored.
+
+**What runs where (the three-gate chain).** A signed update passes three
+independent verification gates before it can boot and arm:
+
+1. **App-side gate — `secure_boot apply_update` (A-5).** Verifies the staged
+   `update_manifest.bin` (CRC32 + RSA-PSS + board_id, the UPD001 checks),
+   enforces **anti-rollback** (staged manifest `created_at` older than the
+   active manifest's ⇒ reject, reason 8; equal allowed for idempotence),
+   parses the untrusted-but-self-validating `UPDATE.MTA` sidecar
+   (`image_size`/`code_len`/`data_len`), then makes a **single streamed pass**
+   over `UPDATE.BIN` computing three SHA-256 digests (code region, data
+   region, TOC-signed range) and requires the code/data digests to **equal the
+   RSA-verified manifest's `code_hash`/`data_hash`** — the binding safety
+   requirement above, implemented as specified — plus an RSA-PSS spot check
+   of the image's embedded TOC signature (fail-early UX; the BL re-verifies
+   regardless). On accept it writes the `inofly/update_pending` marker and
+   (optionally) reboots to the bootloader. Reject reasons 5 IMAGE_MISSING /
+   6 IMAGE_HASH_MISMATCH / 7 IMAGE_SIG_INVALID / 8 ROLLBACK extend the UPD001
+   set; every attempt is audit-logged (`UPDATE_ATTEMPT`, detail `FW_APPLY`).
+2. **Bootloader gate — `sd_update` (A-4).** Every boot, the BL probes the SD
+   root for `UPDATE.BIN` (read-only ChaN FatFs + minimal polled SDMMC driver;
+   the BL **never writes the SD card** — cleanup is app-owned, which is what
+   terminates the retry loop). It parses the image TOC with strict bounds
+   checks (signature key **pinned to slot 0** — the TOC's key field is
+   attacker-controlled and ignored), streams SHA-256 over the signed range,
+   and RSA-PSS-verifies against the embedded manufacturer pubkey **before any
+   erase**. Idempotence: if the in-flash image digest already equals the
+   staged digest, skip (this is what makes every-boot retry safe). Apply
+   order is torn-write-safe: erase + erase-verify, stream-write with
+   read-back, **first vector-table word committed last** (a torn apply cannot
+   boot), second-pass digest must equal the RSA-verified first-pass digest.
+3. **Next-boot gate — BOOT001 + POST + promotion (A-6).** The freshly written
+   image is signature-verified by the BL on every subsequent boot (BOOT001).
+   In app fw, `promoteAfterUpdate()` runs **before** POST002/003 and promotes
+   the staged manifest to active only if it verifies (CRC + RSA + board_id),
+   is **not a rollback** (`created_at >=` active's), **and**
+   `matchesRunningFirmware()` confirms the flash actually contains the image
+   the manifest describes. Success = audit event 5 `UPDATE_APPLIED` + staged
+   files cleaned; failure = audit event 6 `UPDATE_APPLY_FAILED` + `UPDATE.BIN`
+   quarantined to `UPDATE.BAD` (audit-once, no per-boot spam).
+
+**Power-loss story (bench-proven, B9.6).** Cut power at any point: the file
+is still on SD, the BL re-verifies and re-applies on the next boot,
+unattended. One real bug was found and fixed on the bench: reading torn
+(partially-programmed) H7 flash words during the idempotence check raised an
+ECC bus-fault crash-loop — fixed by skipping the in-flash digest when word 0
+reads erased (the first-word-committed-last invariant proves no complete
+image exists; erase scrubs bad ECC without reading). Documented residual: a
+cut during the *erase* phase can leave word 0 itself unreadable → recovery is
+remove-card → standard DFU/USB reflash.
+
+**Anti-rollback and manifest format v4 (2026-07-16).** Both the apply gate
+and the promotion gate compare staged-vs-active `created_at`. During review
+this was found forgeable: in manifest format v3 `created_at` sat **outside**
+the RSA-signed payload (CRC32-only, attacker-recomputable), so an old
+genuinely-signed manifest could be forward-dated. **Manifest format v4**
+(magic `INOFLY04`, signable payload 98 → 102 bytes) folds `created_at` into
+the signed payload; any timestamp edit now invalidates the manufacturer
+signature. v3 and v4 are mutually unverifiable by design — firmware and
+manifest move together. The **BL-path rollback residual is retained and
+narrowed** (THREAT_MODEL T14): the BL accepts any validly-signed image
+regardless of age (no version counter in the trust root), but a BL-path
+downgrade now lands **fail-closed** app-side — promotion refuses the older
+staged manifest, the newer active manifest is kept, POST002/003 fails against
+the rolled-back flash, and arming is blocked.
+
+**Artifacts and tooling (A-8/A-10).** Bundler v1.2 embeds
+`firmware_update.bin` + `update_image.meta` in hardware bundles and
+**proves hash binding** against the signed manifest at build time;
+`verify_bundle` re-runs the BL's pre-erase RSA check on the host, so a
+passing bundle ≈ "the device will accept this update." The pipeline emits
+loose `UPDATE.BIN`/`UPDATE.MTA` for SD staging. Compliance coverage:
+`tests/compliance/test_ADR023_sd_update.py` (TOC reject matrix, signature
+gate matrix, meta self-validation, A-8 round-trip) + a committed SITL
+integration matrix (`tests/integration/test_sitl_apply_update.py`, 44/44:
+apply accept/reject reasons 5-8 + promotion choreography/quarantine/rollback).
+
+**BOOT005 (per ADR-024) ships inside this ADR.** Implemented A-7 as
+`CONFIG_BOOTLOADER_REFUSE_DFU`, **default OFF**: when enabled, a boot with no
+bootloader-entry request jumps straight to the verified app before USB ever
+enumerates — the SD update path (gate 2) runs first, so a healthy unit still
+has a non-DFU update path, which is exactly the precondition ADR-024 set.
+Compiled out when off (zero size delta); +8 B when on. Hardware matrix = B10
+(pending).
+
+**PX4 commits:** A-1 `dfda9e7bb7`, A-2 `2bdebceae0`, A-3 `4f90ebb4b9` +
+`4c1541d215`, A-4 `c4aa2811eb` + ECC fix `4e1ba38009`, A-5 `86280b9d68`,
+A-6 `4fe0f96ead`, A-7 `99d4a2dbbc`. **inoflyTools:** B9 matrix `284f03a` /
+`7552c6e`, A-6 decoder `ace5585`, B10 matrix `5ef2a41`, A-8/A-10 `661de0b`.
+
 ### ADR-024 — BOOT005 (DFU-refuse) reclassified to defense-in-depth, deferred into ADR-023 (2026-06-05, amends ADR-014)
 
-**Status:** 📝 Reclassification + finding. **No code.** BOOT005 remains
+**Status:** 📝 Reclassification + finding. ~~**No code.** BOOT005 remains
 **not implemented** (confirmed against PX4 source 2026-06-05 — only BOOT001
 TOC-verify is wired; `stm32_common/main.c` still enters the stock upload
-loop). This ADR records *why* BOOT005 is no longer treated as a load-bearing
-Path-A closure, and folds its eventual implementation into ADR-023.
+loop).~~ ✅ **UPDATE 2026-07-15: BOOT005 is now IMPLEMENTED inside ADR-023
+(work package A-7)** as `CONFIG_BOOTLOADER_REFUSE_DFU`, **default OFF** —
+exactly the deferred-into-ADR-023 sequencing this ADR prescribed, enabled
+only after the SD-staged update path gave healthy units a non-DFU update
+route. Compiled out when off (zero bootloader size delta); hardware
+validation = BOOTLOADER_BRINGUP **B10** (pending). The reclassification
+below is unchanged: BOOT005 remains defense-in-depth, not load-bearing —
+the tamper seal carries Path A. This ADR records *why*, and folds the
+implementation into ADR-023.
 
 **What changed.** ADR-014 framed software DFU-refuse as the mechanism that
 **closes Path A** — "same end property as BOOT003 (RDP L2)." Walking the
@@ -2930,6 +3068,10 @@ malicious bootloader (same class as the "manufacturer private key compromise"
 residual; §13). (b) **Anti-rollback** — BOOT008 verifies *authenticity*, not
 *freshness*: an older validly-signed bootloader is still accepted (threat-model
 T14, no version counter). Both are future BOOT00x, not Level 1 requirements.
+*(The **app-firmware** side of T14 was partially closed 2026-07-16 by ADR-023 +
+manifest format v4 — `created_at` anti-rollback at apply/promotion, timestamp
+inside the signed payload. This residual is specifically about **bootloader**
+images.)*
 
 **Relationship to ADR-023.** Independent of, but complementary to, ADR-023
 (auto firmware update): both reuse `secure_verify_pss`. BOOT008 was sequenced

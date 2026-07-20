@@ -1,7 +1,7 @@
 # Threat Model — Inofly UAS Firmware Security
 
-**Document version:** 1.4
-**Date:** 2026-06-30 (amended)
+**Document version:** 1.5
+**Date:** 2026-07-16 (amended)
 **Scope:** DGCA Level 1 Type Certification — Firmware Manufacturer
 **Framework:** Adapted from STRIDE for embedded UAS systems
 
@@ -36,6 +36,33 @@
 > ratings ("Low on sealed production units") are unchanged because they already
 > rest on the seal, not on BOOT005.
 
+**Changes in 1.5 (2026-07-16):**
+- **T15 added — malicious SD-staged update (ADR-023 executed):** the SD-staged
+  update path (`UPDATE.BIN`/`UPDATE.MTA` at SD root, applied by the secure
+  bootloader) is a **new attack surface** and gets its own threat entry:
+  verify-before-erase (RSA-PSS vs embedded pubkey) at the BL, TOC parser
+  bounds-checked with the signature key **pinned** (the TOC's key field is
+  attacker-controlled), BL mounts the SD **read-only** (no SD-write surface in
+  the trust root), meta sidecar untrusted-but-self-validating. Bench-proven
+  refusals: tampered image (B9.3), attacker-key image (B9.4), power-loss
+  recovery (B9.6).
+- **T14 partially closed (ADR-023 + manifest format v4):** the app-side update
+  path now enforces `created_at` anti-rollback at **apply** (reject reason 8)
+  and at **first-boot promotion** (refusal + audit event 6). Manifest format
+  **v4** (2026-07-16) folds `created_at` into the RSA-signed payload — in v3
+  it was CRC-only and the compared timestamp was forgeable. The BL-path
+  residual is retained (authenticity, not freshness) but now lands
+  **fail-closed**: promotion refuses the older manifest, POST fails against
+  the rolled-back flash, arming stays blocked. T14 section + Risk Summary row
+  updated.
+- **BOOT005 implemented (A-7, default OFF):** T10 Risk Summary row updated —
+  `CONFIG_BOOTLOADER_REFUSE_DFU` now exists in code inside ADR-023, ships
+  **OFF**, remains defense-in-depth per ADR-024 (B10 bench pending).
+- **Consistency rows:** §5 DGCA mapping gained T14/T15 rows (T14 had never
+  been mapped); §6 in-scope list corrected ("BOOT005 closes Path A" →
+  seal per ADR-024) and now names the SD-staged write path; §7.3 bypass
+  table gained row 13 (malicious SD-staged update).
+
 **Changes in 1.4 (2026-06-30):**
 - **T11-H flipped to IMPLEMENTED (BOOT008 / [ADR-025](ARCHITECTURE.md)):** the
   bootloader is now a signed embedded-TOC artifact and `bl_update` RSA-PSS-
@@ -43,7 +70,8 @@
   section (added Resolution row), the T11 and T11-H Risk Summary rows. The
   `bl_update` sector-0 path is now closed by cryptography, not only the seal +
   access control; pending hardware validation (BOOTLOADER_BRINGUP B8). Residual
-  narrows to signing-process compromise + rollback (T14, still open).
+  narrows to signing-process compromise + rollback (T14, still open — since
+  partially closed in 1.5).
 
 **Changes since 1.2 (2026-06-13 → 2026-06-30):**
 - **T11 / T12' `bl_update` claim corrected (2026-06-13, hardware finding):**
@@ -290,15 +318,42 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | **Resolution (BOOT008)** | The bootloader is now a manufacturer-signed embedded-TOC artifact (`bl_toc.c`, B-1), signed host-side (`sign_bootloader_image`, B-2). `bl_update` RSA-PSS-verifies the candidate bootloader against the embedded manufacturer key on the same in-RAM buffer it will flash, and **refuses before erasing sector 0** on any failure (B-3, shared `secure_verify` lib; gated by `CONFIG_BL_UPDATE_REQUIRE_SIG=y` on the secure target). Refuse-before-erase adds no brick path. Even a seal-breaking, console-having attacker can no longer install an **unsigned** bootloader. |
 | **Status** | ✅ **IMPLEMENTED in code (B-1…B-3), builds on NuttX + SITL; pending hardware validation (BOOTLOADER_BRINGUP B8).** The Level 1 integrity property was already delivered by bootstrap-trust + the tamper seal (ADR-013/015, the standard pattern at this tier — ArduPilot ships the same); BOOT008 hardens it. Residual: signing-process compromise (still produces a validly-signed image — §13 residual) and rollback (T14 — authenticity not freshness; no version counter). |
 
-### T14 — Firmware rollback / downgrade ⭐ NEW 2026-06-13
+### T14 — Firmware rollback / downgrade ⭐ NEW 2026-06-13 · 🟡 PARTIALLY CLOSED 2026-07-16
+
+> ✅ **PARTIALLY CLOSED 2026-07-16 (ADR-023 + manifest format v4).** The
+> **app-side update path** now enforces anti-rollback at two points: `secure_boot
+> apply_update` rejects a staged manifest whose `created_at` is older than the
+> active one's (reject reason 8, audit-logged), and first-boot
+> `promoteAfterUpdate()` applies the same check before promoting (refusal =
+> audit event 6, code 8). **Manifest format v4** makes the compared timestamp
+> unforgeable: `created_at` moved inside the manifest's RSA-signed payload
+> (in v3 it was CRC32-only — an attacker could forward-date an old signed
+> manifest and beat both checks). **Residual retained:** the bootloader's SD
+> gate verifies *authenticity*, not *freshness* — a genuinely-signed old image
+> staged with its matching old manifest still flashes at the BL — but this now
+> lands **fail-closed**: promotion refuses the older manifest, the newer active
+> manifest is kept, POST002/003 fails against the rolled-back flash, and arming
+> stays blocked (downgrade becomes a detectable availability problem, not a
+> silent integrity one). Full close remains a **monotonic version counter in
+> the bootloader** — future BOOT00x.
 
 | Field | Value |
 |-------|-------|
 | **Attack** | Attacker (with the same access needed to flash firmware) installs an **older but genuinely manufacturer-signed** app firmware carrying a known, since-patched vulnerability. BOOT001 verifies *authenticity*, not *freshness* — there is no monotonic version counter — so a validly-signed old image is accepted and boots. |
 | **Impact** | Re-introduces a patched vulnerability. The chain of trust itself is **not** broken — the image is genuinely manufacturer-signed. |
 | **Likelihood** | Low — requires firmware-flash access, which on a deployed unit means a MAVLink-signed link (remote) or breaking the BOOT007 seal (local USB/DFU). Same access gate as T10/T11. |
-| **Mitigations** | **Accepted residual — by design, not a DGCA Level 1 requirement.** Anti-rollback is not part of the Level 1 integrity property; the single-keypair model carries no version counter; USB sits behind the tamper seal in production. If desired later: a **monotonic version counter** checked by the bootloader (reject images older than last-known-good) — a future BOOT00x, paired with T11-H. |
-| **Residual risk** | Low on sealed production units (access-gated); accepted at Level 1. |
+| **Mitigations** | ~~**Accepted residual — by design, not a DGCA Level 1 requirement.**~~ ✅ **App-path closed (ADR-023 + v4):** `created_at` anti-rollback at apply + promotion, timestamp inside the RSA-signed payload. **BL-path accepted residual, fail-closed:** no version counter in the trust root; a BL-path downgrade fails POST and cannot arm. Anti-rollback is still not a DGCA Level 1 requirement. Full close if desired later: a **monotonic version counter** checked by the bootloader — a future BOOT00x, paired with T11-H. |
+| **Residual risk** | Low on sealed production units (access-gated); BL-path downgrade = availability impact only (unit refuses to arm until re-flashed); accepted at Level 1. |
+
+### T15 — Malicious SD-staged update ⭐ NEW 2026-07-16 (ADR-023 surface)
+
+| Field | Value |
+|-------|-------|
+| **Attack** | Attacker places a crafted `UPDATE.BIN` / `UPDATE.MTA` at the SD card root — physically (seal-breaker with SD access) or remotely (MAVLink-FTP file write over a signed link) — hoping the bootloader's every-boot SD probe flashes attacker code, corrupts flash via a malformed TOC, or downgrades the unit (→ T14). |
+| **Impact** | If the verify-before-erase gate failed: arbitrary code execution below the app fw. Otherwise: at worst denial of service (unit busy refusing the staged file each boot). |
+| **Likelihood** | Low — remote requires a MAVLink-signed link (PAIR001); local requires breaking the BOOT007 seal. Same access gates as T10/T11/T14. |
+| **Mitigations** | **Verify-before-erase (the load-bearing control):** the BL streams SHA-256 over the staged image and RSA-PSS-verifies against the **embedded** manufacturer pubkey before erasing a single byte — unsigned, tampered, or attacker-keyed images are refused with flash untouched (bench: B9.3 tampered, B9.4 attacker-key). **Parser hardening:** TOC parse is strictly bounds-checked and the signature key slot is **pinned** — the TOC's own key field is attacker-controlled and ignored. **No SD-write surface in the trust root:** the BL mounts the SD read-only (ChaN FatFs RO); all cleanup/quarantine is app-owned. **Meta sidecar untrusted:** `UPDATE.MTA` is self-validating against the signed manifest's hashes; lying about lengths ⇒ hash-binding failure (reject reason 6). **Torn-write safety:** first vector-table word committed last + ECC-safe idempotence check, so power games during apply cannot produce a bootable half-image (bench: B9.6). **App-side quarantine:** a failing image is renamed `UPDATE.BAD`, terminating the BL retry loop (bounded DoS, audit event 6). |
+| **Residual risk** | Low. Genuinely-signed old image = T14 (fail-closed via promotion + POST). Persistent garbage-staging = bounded DoS on an attacker who already has seal-broken or signed-link access. Cut-power-during-erase can leave the unit needing DFU/USB recovery (documented in ADR-023). |
 
 ---
 
@@ -315,13 +370,14 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | T7 — Telemetry spoofing | **Low** | Low |
 | T8 — Flash corruption | **Low** | Low |
 | T9 — Board ID mismatch | **Medium** | Low |
-| T10 — DFU (Path A) bypass | **High** (Phase 5b open) | ~~Low (BOOT001) → None (BOOT003)~~ ~~✅ Low (BOOT001 + BOOT005)~~ → **Low: BOOT001 + tamper seal (BOOT007)**; BOOT005 = DiD, deferred into ADR-023 (ADR-024) |
+| T10 — DFU (Path A) bypass | **High** (Phase 5b open) | ~~Low (BOOT001) → None (BOOT003)~~ ~~✅ Low (BOOT001 + BOOT005)~~ → **Low: BOOT001 + tamper seal (BOOT007)**; BOOT005 = DiD, ✅ implemented in ADR-023 2026-07-15 (default OFF, B10 pending) per ADR-024 |
 | T11 — Bootloader replacement | **High** (no seal, no DFU-refuse) | **Low on sealed production units** — ⚠️ **2026-06-13:** closure was **BOOT007 seal + access control** (only-signed-app-runs + MAVLink signing), **not** crypto on the `bl_update` path. ✅ **2026-06-30 (BOOT008/ADR-025):** `bl_update` now RSA-PSS-verifies the bootloader before erase, so unsigned images are refused by **cryptography** too (pending B8 hw validation). BOOT005 = DiD/deferred per ADR-024 |
 | ~~T12 — OTP key tampering~~ | ~~**None**~~ | ~~None (hardware-enforced)~~ 🚫 Retired — see T12' |
 | T12' — Bootloader-embedded pubkey tampering ⭐ | **High** (Phase 5b open) | Low at crypto layer on sealed production units (same controls as T11); physical-attacker residual handled procedurally |
 | T13 — Debugger verify skip | **High** (no seal) | ~~None (RDP L2)~~ ✅ Low at crypto layer on sealed production units (BOOT007); RMA inspection workflow for the seal-breaking case |
 | T11-H — Signed bootloader updates ⭐ | High if `bl_update` reachable + unsigned accepted | ✅ **IMPLEMENTED (BOOT008/ADR-025)** — `bl_update` verify-before-erase; tamper-evident → tamper-resistant. Pending B8 hw validation; not required for L1. Residual: signing-process compromise, rollback (T14) |
-| T14 — Firmware rollback ⭐ | **Low** (access-gated) | Accepted residual — by design, no version counter; future BOOT00x if wanted |
+| T14 — Firmware rollback ⭐ | **Low** (access-gated) | 🟡 **Partially closed 2026-07-16 (ADR-023 + manifest v4):** app-path `created_at` anti-rollback at apply + promotion, timestamp RSA-signed; BL-path residual fail-closed (POST blocks arming). Full close = future BOOT00x version counter |
+| T15 — Malicious SD-staged update ⭐ | **Low** (access-gated) | ✅ Verify-before-erase at the BL (RSA-PSS vs embedded key) + pinned-key bounds-checked TOC parse + read-only BL FS + app-side quarantine; bench-proven B9.3/B9.4/B9.6 |
 
 ---
 
@@ -342,6 +398,8 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 | T11 | ~~BOOT003~~ ✅ BOOT006 + BOOT007 (BOOT005 DiD/deferred — ADR-024) | Tamper Resistance (operational lockdown — bootstrap-trust + seal) |
 | ~~T12~~ → T12' | ~~BOOT002~~ ✅ BOOT006 + BOOT007 (BOOT005 DiD/deferred — ADR-024) | Root of Trust (bootloader-embedded pubkey, protected operationally) |
 | T13 | ~~BOOT003~~ ✅ BOOT007 | Tamper Resistance (seal-gated SWD path + RMA inspection) |
+| T14 ⭐ | UPD001 apply/promotion `created_at` anti-rollback (app path, ADR-023 + manifest v4); BL-path residual accepted, fails closed via POST | Secure Update (anti-rollback itself not an L1 clause) |
+| T15 ⭐ | UPD001 (apply-path binding) + BOOT001 (BL verify-before-erase) + POST001 | Secure Update, Secure Boot |
 
 ---
 
@@ -352,8 +410,11 @@ Manufacturer ──[.fwbundle]──> GCS ──[MAVLink]──> Flight Module
 - Manufacturer signing and drone-side verification
 - USB-only attackers (remote, opportunistic) — every software write
   path to flash is gated by signature verification: UPD001 covers
-  Path B (MAVLink-FTP), BOOT001 covers app fw on every boot, BOOT005
-  closes Path A (DFU), BOOT006 makes `bl_update` the only sector-0
+  Path B (MAVLink-FTP), BOOT001 covers app fw on every boot, ~~BOOT005
+  closes Path A (DFU)~~ *(per ADR-024: the tamper seal closes Path A;
+  BOOT005 is DiD, implemented 2026-07-15, ships OFF)*, the ADR-023
+  SD-staged path is gated by BL verify-before-erase + apply-path hash
+  binding (T15), BOOT006 makes `bl_update` the only sector-0
   write path and gates it on a signed app fw
 - GCS display of security status
 
@@ -567,6 +628,7 @@ shows the attack, the layer that stops it, and the residual risk.
 | 10 | Compromise the manufacturer's private key | Operational controls: HSM / offline storage, key ceremony, access controls | Single point of failure for any PKI-based system; same exposure as Apple/Microsoft/Google software signing |
 | 11 | Supply chain — inject malicious code into PX4 source before signing | Out of secure-boot scope. Mitigated by reproducible builds, code review, controlled build host | Acknowledged; not a software-attack-against-the-device vector |
 | 12 ⭐ | Supply-chain compromise of the **first-install** trust window (factory PX4 bootloader trusts anything; we use it once to load our first signed app fw) | Verify factory bootloader hash on receipt at our facility before first install (MANUFACTURING_RUNBOOK.md step 2); first install performed only at our trusted facility; sealed before shipping. | Acknowledged residual; same control category as supply-chain trust generally — mitigated procedurally |
+| 13 ⭐ (2026-07-16) | Stage a malicious or rolled-back `UPDATE.BIN` (+ `UPDATE.MTA`) at the SD root for the bootloader's every-boot probe (the ADR-023 update path; reachable via local SD access or MAVLink-FTP file write) | Bootloader RSA-PSS **verify-before-erase** against the embedded manufacturer pubkey (signature key slot pinned, TOC parse bounds-checked, SD mounted read-only) AND app-side `apply_update` image↔manifest hash binding + `created_at` anti-rollback (manifest format v4 signs the timestamp) AND first-boot promotion (`matchesRunningFirmware`) + POST. See **T15**. | Arbitrary code requires the manufacturer private key. Old-genuinely-signed image = T14: flashes at the BL but fails closed at promotion/POST (unit won't arm). Garbage-staging = bounded DoS (quarantine `UPDATE.BAD`) |
 
 ### 7.4 The property the chain guarantees
 

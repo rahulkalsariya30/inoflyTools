@@ -654,6 +654,8 @@ Where SITL says `pxh>`, hardware uses the `nsh>` / MAVLink Console prompt.
 | §13 attacker-key | **H13** | reason=3 on real libtomcrypt verify path |
 | §14 reason 4/5 (stub) | **H14** | **Organic** reason 4/5 — no stub; the Tier 1 prize |
 | — | **H15** | **Real board_id mismatch** (update reason=4) — new |
+| SITL apply/promotion matrix (`tests/integration/test_sitl_apply_update.py`, 44/44) | **H16** ⭐ | ADR-023 end-to-end **from QGC** + real BL flash + the `matchesRunningFirmware()` promotion leg SITL stubs out — needs A-11 |
+| same matrix, negative legs | **H17** ⭐ | All three gates' rejects on real silicon + power-loss recovery regression (B9.6 mechanic) |
 
 ---
 
@@ -712,8 +714,11 @@ Where SITL says `pxh>`, hardware uses the `nsh>` / MAVLink Console prompt.
   Copy the resulting `release/cubepilot_cubeorangeplus_default_manifest.bin` to
   the SD card at `/fs/microsd/inofly/manifest.bin` (mount the SD on the host, or
   push via QGC MAVLink-FTP).
-- **Pass:** `manifest.bin` is **373 bytes**, magic `INOFLY03`,
-  `format_ver = 3`. Host-side pre-check passes before provisioning:
+- **Pass:** `manifest.bin` is **373 bytes**, magic `INOFLY04`,
+  `format_ver = 4` *(format v4 since 2026-07-16 — `created_at` is inside the
+  RSA-signed payload; a v3 `INOFLY03` manifest is rejected by v4 firmware and
+  vice versa, so always regenerate the manifest from the same pipeline run as
+  the flashed build)*. Host-side pre-check passes before provisioning:
   ```
   python tools/provisioning/export_manifest.py <bundle>.json \
       --output /tmp/manifest.bin --verify   # → Verification: passed
@@ -941,6 +946,64 @@ deliberately wrong hash**. Two ways:
 
 ---
 
+## H16. ADR-023 signed update end-to-end from QGC — **milestone** ⭐ NEW 2026-07-16 (A-9; runs after A-11 QGC work)
+
+- **Covers:** the full operator-facing update flow — QGC uploads a v1.2
+  `.fwbundle`'s artifacts, `apply_update` verifies + stages, reboot-to-BL,
+  the secure bootloader flashes from SD, first-boot **promotion** activates
+  the new manifest, POST goes green — with the audit trail to prove it.
+  This is the hardware twin of the committed SITL matrix
+  (`tests/integration/test_sitl_apply_update.py`) plus the QGC transport
+  and the `matchesRunningFirmware()` leg that SITL stubs out.
+- **Prereqs:** secure (A-4+) bootloader installed (B9 unit state);
+  **manifest format v4 on both sides** (firmware and manifest from the same
+  pipeline run); A-11 QGC flow built. Until A-11 lands, the bench-verb
+  variant (`secure_boot apply_update --reboot` with hand-staged files) is the
+  fallback — that variant was already proven in B9/B10.3.
+- **Action:** build + sign a *newer* release (`pipeline.py` with `--elf`),
+  deliver `UPDATE.BIN` + `UPDATE.MTA` + staged `update_manifest.bin` via QGC
+  (MAVLink-FTP), trigger apply from QGC, let the unit reboot and complete.
+- **Pass:**
+  - `apply_update` accepts (authorized, `image_verified=true`), writes the
+    `inofly/update_pending` marker, reboots to the bootloader;
+  - BL applies (solid-LED erase → flicker write), new app boots;
+  - first boot: promotion renames `inofly/update_manifest.bin` →
+    `manifest.bin`, deletes `UPDATE.BIN`/`UPDATE.MTA`/marker;
+  - POST green against the promoted manifest (`listener
+    firmware_integrity_status` → `check_passed=true`, new `code_hash`);
+  - audit log shows `UPDATE_ATTEMPT` (FW_APPLY, success) and **event 5
+    `UPDATE_APPLIED`** with the new version string
+    (`tools/verify_audit_log.py` + decoder both clean);
+  - second reboot: no promotion re-run (idempotent, no duplicate event 5).
+
+## H17. ADR-023 negatives at all three gates + power-loss recovery ⭐ NEW 2026-07-16 (A-9)
+
+- **Covers:** every reject path of the update chain on real silicon, and the
+  unattended power-loss story. Extends B9.3/B9.4 (BL gate) with the app-gate
+  and promotion-gate negatives the SITL matrix proved (reasons 5–8, quarantine).
+- **Action + Pass, per gate:**
+  1. **App gate (`apply_update`):** tampered image → reason 6
+     (IMAGE_HASH_MISMATCH); attacker-key image → reason 7 (IMAGE_SIG_INVALID);
+     meta lying about lengths → reason 6; missing image or meta → reason 5;
+     **older signed manifest → reason 8 (ROLLBACK)** — v4 makes the timestamp
+     unforgeable, so also verify a CRC-refixed forward-dated v3-style tamper
+     now dies at **reason 3 (signature)**, not at the rollback compare.
+     Each: one `UPDATE_ATTEMPT` FAILURE audit entry, no marker written.
+  2. **BL gate:** stage tampered / attacker-key `UPDATE.BIN` directly (bypass
+     the app gate) → refused **before erase**, hashes bit-identical after
+     boot (B9.3/B9.4 mechanic, re-run on the current BL).
+  3. **Promotion gate:** stage a valid `UPDATE.BIN` + a staged manifest that
+     does NOT match the flashed image → promotion fails, **event 6
+     `UPDATE_APPLY_FAILED`** logged once (no per-boot spam), image
+     quarantined to `UPDATE.BAD`, active manifest untouched, POST green on
+     the old firmware. Delete `UPDATE.BAD` to clean up.
+  4. **Power loss (regression of B9.6):** pull power mid-write during a valid
+     apply → next boot re-verifies and re-applies unattended; POST green.
+- **Cleanup:** card back to `manifest.bin`-only state; audit log FTP'd and
+  archived with the session record.
+
+---
+
 ## Bootloader chain (BOOT001 / BOOT005 / BOOT006) — separate phase
 
 Tier 1 above runs under the **factory PX4 bootloader** with our signed
@@ -968,8 +1031,10 @@ bootloader on this same Tier 1 bench unit immediately after H1–H15, or
 dedicated unit (so a `bl_update` mistake never blocks app-fw Tier 1
 testing). Recommendation: **(b)** — finish H1–H15 under the factory
 bootloader first; the app-fw security stack is independently valuable and
-the bootloader install is the one irreversible-ish step (DFU is
-software-refused afterward).
+the bootloader install is the one irreversible-ish step ~~(DFU is
+software-refused afterward)~~ *(BOOT005 DFU-refuse ships **default OFF** per
+ADR-024, so the QGC/DFU recovery loop stays available; since BOOT008 the
+replacement bootloader must be manufacturer-signed either way)*.
 
 ---
 
