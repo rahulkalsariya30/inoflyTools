@@ -40,7 +40,7 @@ class Requirement:
     req_id: str
     description: str
     dgca_clause: str
-    status: str                    # "done", "done_sitl", "hardware_pending"
+    status: str                    # "done", "done_sitl", "hardware_validated", "hardware_pending"
     implementation: list           # code/tool references
     tests: list = field(default_factory=list)     # filled from pytest
     test_results: dict = field(default_factory=dict)  # {test_name: pass/fail}
@@ -128,33 +128,41 @@ REQUIREMENTS = {
         req_id="POST002",
         description="POST — verify actual code hash at runtime (NuttX)",
         dgca_clause="POST (Section 7.1)",
-        status="hardware_pending",
+        status="hardware_validated",
         implementation=[
-            "Requires NuttX linker symbols (_stext/_etext) for flash addresses",
-            "SITL: stubbed (returns true) — not meaningful in simulation",
-            "Target: OrangeCube / Pixhawk hardware with libtomcrypt (already linked into PX4 NuttX)",
+            "Hashes flash range [_stext .. _compliance_params_start) via libtomcrypt SHA-256",
+            "Host tests cover the fixture tooling + reason-code plumbing; the on-silicon",
+            "  hash-compute has no host test (POSIX branch short-circuits — no real flash), so it is validated on target",
+            "VALIDATED ON HARDWARE (CubeOrange+): Docs/HARDWARE_ACCEPTANCE.md H14.A —",
+            "  wrong-code-hash manifest caught over real 1.87 MB flash hash, failure_reason=4,",
+            "  arming blocked (2026-06-04 bench session)",
         ],
     ),
     "POST003": Requirement(
         req_id="POST003",
         description="POST — verify actual data hash at runtime (NuttX)",
         dgca_clause="POST (Section 7.1)",
-        status="hardware_pending",
+        status="hardware_validated",
         implementation=[
-            "Requires knowledge of PX4 parameter storage address on target",
-            "SITL: stubbed (returns true)",
-            "Target: OrangeCube / Pixhawk hardware",
+            "Hashes flash range [_compliance_params_start .. _compliance_params_end) via libtomcrypt SHA-256",
+            "Host tests cover fixture tooling + plumbing; the on-silicon hash-compute has no host test (no real flash to hash)",
+            "VALIDATED ON HARDWARE (CubeOrange+): Docs/HARDWARE_ACCEPTANCE.md H14.B —",
+            "  correct code_hash + wrong data_hash (96-byte param table) caught, failure_reason=5,",
+            "  confirming code->data check ordering on real silicon (2026-06-04 bench session)",
         ],
     ),
     "POST004": Requirement(
         req_id="POST004",
         description="POST — verify board ID matches hardware",
         dgca_clause="POST (Section 7.1)",
-        status="hardware_pending",
+        status="hardware_validated",
         implementation=[
-            "Board ID available via CONFIG_BOARD_ID at compile time",
-            "Small effort — compare manifest.board_id against hardware",
-            "Target: both SITL and NuttX",
+            "Compares manifest.board_id against compiled SECURE_BOOT_BOARD_ID (1063 for CubeOrange+)",
+            "Host tests cover the board_id compare logic + CMake wiring; SITL board_id is",
+            "  synthetic, so a genuine mismatch cannot be exercised against a real target ID in CI",
+            "VALIDATED ON HARDWARE (CubeOrange+): Docs/HARDWARE_ACCEPTANCE.md H15 —",
+            "  board_id 1064 manifest REJECTED against real hardware 1063 (reason=4); 1063 ACCEPTED",
+            "  (2026-06-04 bench session)",
         ],
     ),
     "ARM001": Requirement(
@@ -373,7 +381,9 @@ def build_compliance_matrix(test_mapping: dict) -> list:
         skipped = sum(1 for t in tests if t["outcome"] == "skipped")
 
         # Determine compliance verdict
-        if req.status == "hardware_pending":
+        if req.status == "hardware_validated":
+            verdict = "HARDWARE_VALIDATED"
+        elif req.status == "hardware_pending":
             verdict = "HARDWARE_PENDING"
         elif total == 0:
             verdict = "NO_TESTS"
@@ -443,22 +453,32 @@ def generate_text_report(matrix: list, summary: dict, output_path: Path):
     total_reqs = len(matrix)
     passing = sum(1 for r in matrix if r["verdict"] == "PASS")
     failing = sum(1 for r in matrix if r["verdict"] == "FAIL")
+    hw_validated = sum(1 for r in matrix if r["verdict"] == "HARDWARE_VALIDATED")
     hw_pending = sum(1 for r in matrix if r["verdict"] == "HARDWARE_PENDING")
     no_tests = sum(1 for r in matrix if r["verdict"] == "NO_TESTS")
 
     w("")
     w("REQUIREMENT SUMMARY")
     w("-" * 40)
-    w(f"  Total requirements:  {total_reqs}")
-    w(f"  PASS:                {passing}")
-    w(f"  FAIL:                {failing}")
-    w(f"  HARDWARE_PENDING:    {hw_pending}")
-    w(f"  NO_TESTS:            {no_tests}")
+    w(f"  Total requirements:   {total_reqs}")
+    w(f"  PASS (host tests):    {passing}")
+    w(f"  HARDWARE_VALIDATED:   {hw_validated}   (host tests cover plumbing; on-silicon check validated on CubeOrange+ — see below)")
+    w(f"  FAIL:                 {failing}")
+    w(f"  HARDWARE_PENDING:     {hw_pending}")
+    w(f"  NO_TESTS:             {no_tests}")
 
-    overall = "PASS" if failing == 0 and no_tests == 0 else "CONDITIONAL"
+    # HARDWARE_VALIDATED is not a gap: these requirements are exercised and
+    # passing on real hardware, they simply have no SITL/host unit test (the
+    # checks are meaningless in simulation). They do NOT make the verdict
+    # conditional; only genuine failures or untested requirements do.
+    overall = "PASS" if failing == 0 and no_tests == 0 and hw_pending == 0 else "CONDITIONAL"
     if failing > 0:
         overall = "FAIL"
     w(f"\n  OVERALL VERDICT:     {overall}")
+    if hw_validated > 0:
+        w(f"  NOTE: {hw_validated} requirement(s) have host tests for plumbing/fixtures only;")
+        w(f"        the on-silicon check (real-flash hashing / real board_id) is validated on")
+        w(f"        CubeOrange+ hardware — POST002/003/004, see HARDWARE_ACCEPTANCE.md")
     if hw_pending > 0:
         w(f"  NOTE: {hw_pending} requirement(s) pending hardware deployment")
 
@@ -474,6 +494,7 @@ def generate_text_report(matrix: list, summary: dict, output_path: Path):
         verdict_marker = {
             "PASS": "[PASS]",
             "FAIL": "[FAIL]",
+            "HARDWARE_VALIDATED": "[HW-OK]",
             "HARDWARE_PENDING": "[HW]",
             "NO_TESTS": "[--]",
             "PARTIAL": "[!!]",
@@ -482,7 +503,12 @@ def generate_text_report(matrix: list, summary: dict, output_path: Path):
         w(f"{verdict_marker}  {entry['req_id']} — {entry['description']}")
         w(f"        DGCA Clause: {entry['dgca_clause']}")
         w(f"        Status:      {entry['implementation_status']}")
-        w(f"        Tests:       {entry['tests_passed']}/{entry['tests_total']} passed")
+        if entry["verdict"] == "HARDWARE_VALIDATED":
+            w(f"        Tests:       {entry['tests_passed']}/{entry['tests_total']} host tests"
+              f" passed (plumbing/fixtures only)")
+            w(f"                     on-silicon check validated on hardware — see Evidence")
+        else:
+            w(f"        Tests:       {entry['tests_passed']}/{entry['tests_total']} passed")
 
         # Implementation evidence
         w("        Evidence:")
@@ -516,6 +542,26 @@ def generate_text_report(matrix: list, summary: dict, output_path: Path):
     w("")
     w("")
     w("=" * 78)
+    w("HARDWARE-VALIDATED REQUIREMENTS (on-silicon check validated on-target)")
+    w("=" * 78)
+    w("")
+    w("  Host tests cover the surrounding plumbing and fixture tooling, but the actual")
+    w("  on-silicon check is meaningless in simulation (no real flash to hash, no real")
+    w("  board_id), so it cannot run in CI. It is NOT a gap — each is exercised and")
+    w("  passing on CubeOrange+ hardware. Evidence:")
+    w("")
+    hw_ok_entries = [e for e in matrix if e["verdict"] == "HARDWARE_VALIDATED"]
+    if hw_ok_entries:
+        for e in hw_ok_entries:
+            w(f"  {e['req_id']} — {e['description']}")
+            for ev in e["implementation_evidence"]:
+                w(f"    {ev}")
+            w("")
+    else:
+        w("  None.")
+
+    w("")
+    w("=" * 78)
     w("REMAINING GAPS (Hardware Deployment)")
     w("=" * 78)
     w("")
@@ -527,7 +573,8 @@ def generate_text_report(matrix: list, summary: dict, output_path: Path):
                 w(f"    {ev}")
             w("")
     else:
-        w("  None — all requirements have passing tests.")
+        w("  None — every requirement either has passing host tests or is"
+          " hardware-validated (see section above).")
 
     w("")
     w("=" * 78)
@@ -612,7 +659,9 @@ def main():
             print(f"      {req_id}: {count} tests")
         else:
             status = REQUIREMENTS[req_id].status
-            if status == "hardware_pending":
+            if status == "hardware_validated":
+                print(f"      {req_id}: -- (no host test; validated on hardware)")
+            elif status == "hardware_pending":
                 print(f"      {req_id}: -- (hardware pending)")
             else:
                 print(f"      {req_id}: 0 tests (WARNING)")

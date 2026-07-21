@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="540" viewBox="0 0 1240 540">
+<rect width="1240" height="540" fill="white"/>
+<rect x="80" y="30" width="560" height="74" rx="8" fill="#FBF0D3" stroke="#9A6A0B" stroke-width="1.5"/>
+<text x="360.0" y="52" font-family="Helvetica" font-size="13.5" font-weight="bold" fill="#7A5408" text-anchor="middle">Tamper-evident seal</text>
+<text x="360.0" y="72" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="middle">airframe + Cube enclosure — visibly broken on intrusion</text>
+<text x="360.0" y="88" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="middle">compensating control for physical SWD/JTAG access (BOOT007)</text>
+<path d="M 360.0 104 L 360.0 134" stroke="#374151" stroke-width="1.5" fill="none"/>
+<polygon points="360.0,134 355.0,125 365.0,125" fill="#374151"/>
+<rect x="80" y="134" width="560" height="74" rx="8" fill="#DEEBF7" stroke="#1F4E79" stroke-width="1.5"/>
+<text x="360.0" y="156" font-family="Helvetica" font-size="13.5" font-weight="bold" fill="#1F4E79" text-anchor="middle">Verifying bootloader — flash sector 0</text>
+<text x="360.0" y="176" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="middle">carries the manufacturer PUBLIC key</text>
+<text x="360.0" y="192" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="middle">sector 0 writable only via signed bl_update (BOOT006 / BOOT008)</text>
+<path d="M 360.0 208 L 360.0 238" stroke="#374151" stroke-width="1.5" fill="none"/>
+<polygon points="360.0,238 355.0,229 365.0,229" fill="#374151"/>
+<text x="370.0" y="227.0" font-family="Helvetica" font-size="11" font-style="italic" fill="#374151" text-anchor="start">verifies the application-firmware signature every boot (BOOT001)</text>
+<rect x="80" y="238" width="560" height="74" rx="8" fill="#DEEBF7" stroke="#1F4E79" stroke-width="1.5"/>
+<text x="360.0" y="260" font-family="Helvetica" font-size="13.5" font-weight="bold" fill="#1F4E79" text-anchor="middle">App firmware — signed by manufacturer</text>
+<text x="360.0" y="280" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="middle">embeds the manufacturer PUBLIC key</text>
+<text x="360.0" y="296" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="middle">runs POST on every boot</text>
+<path d="M 360.0 312 L 360.0 342" stroke="#374151" stroke-width="1.5" fill="none"/>
+<polygon points="360.0,342 355.0,333 365.0,333" fill="#374151"/>
+<text x="370.0" y="331.0" font-family="Helvetica" font-size="11" font-style="italic" fill="#374151" text-anchor="start">verifies manifest RSA-PSS signature (POST001)</text>
+<rect x="80" y="342" width="560" height="74" rx="8" fill="#DEEBF7" stroke="#1F4E79" stroke-width="1.5"/>
+<text x="360.0" y="364" font-family="Helvetica" font-size="13.5" font-weight="bold" fill="#1F4E79" text-anchor="middle">manifest.bin — signed by manufacturer</text>
+<text x="360.0" y="384" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="middle">registered checksums: code_hash, data_hash + board_id</text>
+<text x="360.0" y="400" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="middle">POST recomputes both hashes from LIVE flash and compares</text>
+<path d="M 360.0 416 L 360.0 446" stroke="#374151" stroke-width="1.5" fill="none"/>
+<polygon points="360.0,446 355.0,437 365.0,437" fill="#374151"/>
+<text x="370.0" y="435.0" font-family="Helvetica" font-size="11" font-style="italic" fill="#374151" text-anchor="start">all integrity checks must pass</text>
+<rect x="80" y="446" width="560" height="64" rx="8" fill="#E4F1E4" stroke="#2E6B34" stroke-width="1.5"/>
+<text x="360.0" y="468" font-family="Helvetica" font-size="13.5" font-weight="bold" fill="#2E6B34" text-anchor="middle">ARM gate</text>
+<text x="360.0" y="488" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="middle">refuses to arm if any check failed — result audit-logged</text>
+<text x="720" y="60" font-family="Helvetica" font-size="12.5" font-weight="bold" fill="#7A5408" text-anchor="start">Physical anchor</text>
+<text x="720" y="80" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">Reaching the debug port (SWD/JTAG) or USB</text>
+<text x="720" y="97" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">requires visibly breaking the seal; a broken seal</text>
+<text x="720" y="114" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">forces the return-to-manufacturer</text>
+<text x="720" y="131" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">re-provisioning workflow.</text>
+<text x="720" y="170" font-family="Helvetica" font-size="12.5" font-weight="bold" fill="#1F4E79" text-anchor="start">Cryptographic anchor</text>
+<text x="720" y="190" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">Every layer below the seal is RSA-PSS-verified</text>
+<text x="720" y="207" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">(SHA-256, MGF1-SHA256, salt 32) against a public</text>
+<text x="720" y="224" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">key vouched for by the layer above it.</text>
+<text x="720" y="241" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start"></text>
+<text x="720" y="258" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">Producing any accepted artifact — bootloader,</text>
+<text x="720" y="275" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">firmware, manifest — requires the private key,</text>
+<text x="720" y="292" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">which never leaves the manufacturer.</text>
+<text x="720" y="330" font-family="Helvetica" font-size="12.5" font-weight="bold" fill="#3B4148" text-anchor="start">Why a “verifying” bootloader</text>
+<text x="720" y="350" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">The STM32H743 has no authenticating Boot ROM.</text>
+<text x="720" y="367" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">The bootloader therefore verifies the firmware;</text>
+<text x="720" y="384" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">its own integrity is anchored operationally</text>
+<text x="720" y="401" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">(bootstrap-trust + signed bl_update + seal) —</text>
+<text x="720" y="418" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">the same posture as the ArduPilot secure-boot</text>
+<text x="720" y="435" font-family="Helvetica" font-size="11.5" fill="#333333" text-anchor="start">pattern, appropriate for DGCA Level 1.</text>
+</svg>
