@@ -654,8 +654,8 @@ Where SITL says `pxh>`, hardware uses the `nsh>` / MAVLink Console prompt.
 | §13 attacker-key | **H13** | reason=3 on real libtomcrypt verify path |
 | §14 reason 4/5 (stub) | **H14** | **Organic** reason 4/5 — no stub; the Tier 1 prize |
 | — | **H15** | **Real board_id mismatch** (update reason=4) — new |
-| SITL apply/promotion matrix (`tests/integration/test_sitl_apply_update.py`, 44/44) | **H16** ⭐ | ADR-023 end-to-end **from QGC** + real BL flash + the `matchesRunningFirmware()` promotion leg SITL stubs out — needs A-11 |
-| same matrix, negative legs | **H17** ⭐ | All three gates' rejects on real silicon + power-loss recovery regression (B9.6 mechanic) |
+| SITL apply/promotion matrix (`tests/integration/test_sitl_apply_update.py`, 44/44) | **H16** ⭐ | ADR-023 end-to-end **from QGC** + real BL flash + the `matchesRunningFirmware()` promotion leg SITL stubs out — needs A-11. *Run 2026-07-21: device chain ✅, QGC transport ❌ (A-11 crash) — still open* |
+| same matrix, negative legs | **H17** ⭐ | All three gates' rejects on real silicon + power-loss recovery regression (B9.6 mechanic). *Run 2026-07-21: ✅ all four gates* |
 
 ---
 
@@ -1002,6 +1002,187 @@ deliberately wrong hash**. Two ways:
 - **Cleanup:** card back to `manifest.bin`-only state; audit log FTP'd and
   archived with the session record.
 
+### H16 / H17 bench session results — 2026-07-21
+
+Run on the Tier 1 CubeOrange+ (board ID 1063) carrying the A-4+ECC
+bootloader `3a404d9a…` (BOOT005 gate **OFF**). Both firmware builds are
+**manifest format v4** (`INOFLY04`) from the same pipeline run as their
+manifests, per ADR-023:
+
+| Name | Build | Identity |
+|---|---|---|
+| **FW-A** | `release/`, 2026-07-19 pipeline run | code `c9f41da8…` data `4c635ab4…`, version `0.1`, `created_at` 2026-07-20T00:59:44Z |
+| **FW-B** | PX4 `6b34271265`, signed 2026-07-20 | code `65396bf8…` data `4c635ab4…`, version `0.2`, `created_at` 2026-07-21T02:59:41Z |
+
+The unit was v3-era at session start. **v3 → v4 cannot cross the SD apply
+path** — a running v3 app cannot verify a v4 staged manifest and rejects
+before it ever reboots — so the prep hop to FW-A was a USB flash plus a
+hand-placed v4 `manifest.bin`. v4 → v4 updates then ran over SD normally.
+
+#### H16 — ⚠️ **PARTIAL: device chain PASS, QGC transport FAIL**
+
+The ADR-023 device chain closed completely, driven by the bench verb
+fallback documented in the H16 prereqs (`secure_boot apply_update
+--reboot` against hand-staged files):
+
+- `apply_update` accepted with `image_verified=true`, marker written;
+- reboot-to-BL → BL verified before erase → erase → write → FW-B booted;
+- first-boot promotion renamed `inofly/update_manifest.bin` →
+  `manifest.bin` and deleted `UPDATE.BIN` / `UPDATE.MTA` / marker;
+- POST green against the promoted manifest, `code_hash` = FW-B's
+  `65396bf8…` — this is the `matchesRunningFirmware()` leg that SITL
+  stubs out, proven on silicon for the first time;
+- audit: **#206** `UPDATE_ATTEMPT` (`FW_APPLY`, success) and **#208**
+  event 5 `UPDATE_APPLIED` — `PROMOTED 0.2`, exactly one — then **#209**
+  POST pass. A second reboot produced the same hash and **no duplicate
+  event 5** (promotion is idempotent);
+- LOG001 clean over the 212-entry log pulled at this point.
+
+**What did not pass: the A-11 QGC flow.** InoflyGCS `b0d642617` crashed
+~4× at the `Confirming` stage — `0xc0000374` `STATUS_HEAP_CORRUPTION` in
+`ntdll`, identical fault bucket every time. WER reports archived at
+`release/h16/qgc_crash/` (minidumps purged by the OS before collection).
+The FTPManager write path was reviewed and cleared as the culprit
+(chunks are clamped, buffer is stack-resident); the fault needs a
+debugger or an instrumented build to localise.
+
+This is an **A-11 defect, not an ADR-023 one** — the transport and the
+post-reboot confirmation UI are the only parts implicated, and the device
+chain above ran to completion independently. H16 stays open until the QGC
+flow is fixed and re-run end-to-end.
+
+> A second, separately-found A-11 defect is already known from source
+> review and will show up as a *false* `InstallTimedOut` on an otherwise
+> successful update: the post-reboot confirm is armed only on the
+> `InstallRebooting → InstallConfirming` transition, so a link flap during
+> the 3 s FTP settle leaves `_vehicle` null in `_beginPostRebootConfirm()`,
+> which returns early **without re-arming the retry timer**
+> (`SecureFirmwareController.cpp:512` and `:1078`; the sibling retry paths
+> at `:1095` / `:1116` do re-arm). Fix both in one rebuild — LTCG linking
+> has OOM'd twice on this machine.
+
+#### H17 — ✅ **PASS, all four gates**
+
+**Gate 1 — app gate (6/6 + 1 unplanned).** Every reject landed on the
+reason the firmware source predicts, including the check *ordering*
+(`verifyStagedManifest()` CRC 2 → sig 3 → board 4, then rollback 8, then
+image binding 5/6/7):
+
+| Row | Fixture | Reason | Console |
+|---|---|---|---|
+| 1a | `UPDATE_TAMPERED.BIN` | **6** IMAGE_HASH_MISMATCH | staged image does not match the manifest hashes |
+| 1b | `UPDATE_ATTACKER.BIN` | **7** IMAGE_SIG_INVALID | `secure_verify ret=7` — not the manufacturer's signature |
+| 1c | good image + `UPDATE_BADMETA.MTA` | **6** | meta invariants passed; hash binding caught the lying code/data split |
+| 1d | no image staged | **5** IMAGE_MISSING | staged image not found |
+| 1e | `MANIFEST_A_OLD` | **8** ROLLBACK | `created_at=1784509184` older than active `1784602781` |
+| 1f | `MANIFEST_FWDDATE` | **3** signature | `secure_verify ret=0` — **the v4 proof** |
+| — | no staged manifest (unplanned) | **1** | staged manifest not found |
+
+Row **1f is the load-bearing v4 result.** The fixture is a forward-dated
+manifest with an honest, recomputed CRC — precisely the attack that beat
+the rollback compare under format v3, where `created_at` sat *outside* the
+signed payload. Under v4 (`INOFLY04`, 102-byte signable payload) the date
+is inside the signature, so the tamper now dies at the signature check and
+never reaches the rollback compare. Flash stayed FW-B throughout, POST
+green, one audit entry per attempt.
+
+**Gate 2 — bootloader gate (2/2).** `UPDATE_TAMPERED.BIN` and
+`UPDATE_ATTACKER.BIN` each staged alone (no staged manifest, bypassing the
+app gate) and rebooted. Both times **the unit booted** — which is itself
+the proof of refusal, since a flashed tampered image would fail BOOT001 and
+never hand off — with flash bit-identical to FW-B and POST green. The
+expected side effect fired each time: the app saw an orphan image, promotion
+returned FAILED reason **1**, one event 6, image quarantined to `UPDATE.BAD`
+— which is what terminates the bootloader's every-boot retry loop.
+
+**Gate 3 — promotion gate.** Staged FW-B's *own* image (already in flash)
+together with `MANIFEST_A_NOW` — authentic, newer, but describing FW-A. The
+BL short-circuited to `ALREADY_APPLIED` with no erase (confirmed by the fast
+boot). Promotion then refused on the flash-vs-manifest compare: `UPDATE.BAD`
+quarantine, active `manifest.bin` **untouched**, POST green on FW-B. A second
+reboot was quiet — no repeat event, so marker deletion does suppress
+per-boot spam.
+
+> ⚠️ **Correction to the H17 spec above.** The staged
+> `inofly/update_manifest.bin` **is retained** on promotion failure — the
+> A-6 choreography deletes only the marker and quarantines the image. The
+> pre-run expectation that the staged manifest would also be removed was
+> wrong; the firmware behaviour is correct and deliberate.
+
+**Gate 4 — power loss (B9.6 regression).** Full valid FW-A set staged,
+`apply_update --reboot` accepted, and the operator **confirmed the cut
+landed in the write phase** (solid erase LED → fast blink / dim glow, then
+power pulled) — a genuinely torn write, not a completed apply. Repower
+recovered **unattended**: re-verify → re-erase → re-write → boot → promote.
+End state FW-A `c9f41da8…`, POST `check_passed: True`, card root clean,
+`MANIFEST.BIN` = `MANIFEST_A_NOW`, staged manifest consumed.
+
+The unit deliberately ends on FW-A. `MANIFEST_A_NOW` is timestamped newer
+than FW-B's manifest, so this is a legitimate signed install of *older
+content* — the documented, intended behaviour of timestamp-based
+anti-rollback, not a downgrade escape.
+
+#### Audit-log evidence — and its one gap
+
+Final pull `release/h17/audit_log.bin` + `.sig`, LOG001 verified offline
+against the manufacturer private key:
+
+```
+$ py tools/verify_audit_log.py \
+    --log release/h17/audit_log.bin \
+    --sig release/h17/audit_log.sig \
+    --key pki/manufacturer/private/manufacturer_private.pem
+  log file:        release\h17\audit_log.bin  (73944 bytes, 234 entries)
+  expected SHA-256: 3541d2da7f87d901a30e9e25ceee0aa87ad8938e0878ded4b63bf96d967b6c6c
+  decrypted hash:   3541d2da7f87d901a30e9e25ceee0aa87ad8938e0878ded4b63bf96d967b6c6c
+PASS: audit log signature is authentic
+
+$ py tools/decode_audit_log.py release/h17/audit_log.bin
+Entries: 234   CRC failures: 0   unrecognised: 0
+Status: OK - every entry parsed and passed CRC.
+```
+
+Coverage reported by the decoder: POST001/002/003 ×107, UPD001 ×17,
+UPD001/ADR-023 promotion ×1, quarantine ×3, PAR001 ×2, arming gate ×104.
+
+> ⚠️ **Gap — the archived log stops after gate 2.** Its last entry is
+> `#233`, 2026-07-21 03:57:51 UTC; gates 3 and 4 ran *after* that pull, so
+> their audit entries (the promotion-mismatch event 6, and gate 4's
+> accepted `FW_APPLY` + event 5 for FW-A) are on the card but **not in the
+> archived evidence**. The three quarantine events present (`#213`, `#229`,
+> `#232`) are all reason-1 orphans, and the single event 5 present is
+> H16's `PROMOTED 0.2`. Gate 3 and gate 4 are recorded here on console and
+> file-state evidence, which is sound but weaker than the signed log.
+> **Action:** pull and archive the log again at the next bench contact,
+> before anything overwrites it — it is append-only, so the entries are
+> still there.
+
+#### Desk follow-ups found during the run (none block H16/H17)
+
+1. **Audit-log wall clock loses elapsed time across a reboot.** `#206`→
+   `#208` spans a reboot, an erase, a 1.8 MB write and a boot, yet reads
+   1 second apart. The logger uses `px4_clock_gettime(CLOCK_REALTIME)`
+   (`SecurityAuditLogger.cpp:241`), which PX4 sets from the GCS rather
+   than from a free-running backed source. Ordering, sequence numbers,
+   CRCs and the LOG001 signature are all unaffected — but an auditor will
+   read a one-second firmware install. Worth checking whether the RTC is
+   battery-backed on this carrier and whether NuttX restores
+   `CLOCK_REALTIME` at boot.
+2. **`FirmwareIntegrityStatus.board_id` is `uint8`** (msg line 14) and
+   takes a `uint16_t` assignment at `FirmwareIntegrityChecker.cpp:244`, so
+   board ID 1063 (`0x427`) reports as **39**. Telemetry only — POST004
+   compares at full width (`:213`) and `board_id` is inside the signed
+   payload. Same truncation already flagged under H4.
+3. **nsh `cp` mangles long-filename case on create.** `cp …
+   update_manifest.bin` produced `update_manifest.BIN`, which the firmware
+   (case-sensitive on LFN lookup) could not open → reason 1. Short 8.3
+   names are case-insensitive and unaffected. **Stage the staged manifest
+   from the PC or over MAVFTP, never with nsh `cp`;** `rm` handles long
+   names correctly.
+
+Session artifacts: `release/H16_H17_RUN_SHEET.md` (gitignored working
+sheet — fixtures, commands, ordering), `release/h16/`, `release/h17/`.
+
 ---
 
 ## Bootloader chain (BOOT001 / BOOT005 / BOOT006) — separate phase
@@ -1092,6 +1273,11 @@ OpenSSL→libtomcrypt interop. After Tier 1, the next milestone is the
 secure-bootloader chain (Phase 5b) and then per-unit production
 provisioning per the Manufacturing Runbook.
 
+**H16/H17 sit on top of Tier 1, not inside it.** They are ADR-023
+(signed-update) acceptance gates added 2026-07-16 and run 2026-07-21;
+Tier 1's H0–H15 scope is unchanged by them. H17 is closed; H16 remains
+open on the A-11 QGC transport only — its device half is proven.
+
 | Step | Result | Date | Notes |
 |---|---|---|---|
 | H0 board health | ✅ | 2026-05-25 | Board ID 1063, IMUs live, PX4GUID `00060000000039333738333335112003d0036` |
@@ -1110,3 +1296,5 @@ provisioning per the Manufacturing Runbook.
 | H13 attacker-key reason=3 | ✅ | 2026-06-04 Day 7 | POST + verify_update + QGC all reject; libtomcrypt sig branch live |
 | H14 organic reason 4/5 | ✅ | 2026-06-04 Day 7 | **Tier 1 prize** — reason=4 (1.87 MB) + reason=5 (96 B, code→data ordering); restore → PASS |
 | H15 board_id reason=4 | ✅ | 2026-06-04 Day 7 | FC gap fixed (PX4 `9bc8395660`); 1064 reject, 1063 accept |
+| H16 ADR-023 update e2e from QGC ⭐ | ⚠️ **partial** | 2026-07-21 | **Device chain PASS** via the bench-verb fallback: apply → reboot-to-BL → BL flash → first-boot promotion → POST green on FW-B `65396bf8…`; audit `#206` `FW_APPLY` + `#208` event 5 `PROMOTED 0.2` (exactly one), idempotent on re-reboot; LOG001 clean. Proves the `matchesRunningFirmware()` promotion leg SITL stubs out. **QGC flow FAIL** — InoflyGCS `b0d642617` crashed ~4× at `Confirming`, `0xc0000374` heap corruption in `ntdll`, same bucket each time (WER at `release/h16/qgc_crash/`). A-11 defect, not ADR-023; **H16 stays open** until the QGC path is fixed + re-run |
+| H17 ADR-023 negatives + power loss ⭐ | ✅ | 2026-07-21 | **All four gates PASS.** App gate 6/6 + 1 unplanned (reasons 6/7/6/5/8/**3**/1, matching the source check ordering); row 1f is the **v4 proof** — a forward-dated, honest-CRC manifest now dies at the *signature*, not the rollback compare. BL gate 2/2 (tampered + attacker-key refused pre-erase; unit booted, flash bit-identical). Promotion gate refused on flash-vs-manifest mismatch with `MANIFEST.BIN` untouched, logged once. Power-loss cut **confirmed mid-write**, recovered unattended. Ends on FW-A `c9f41da8…` (legitimate newer-signed install of older content). ⚠️ Archived audit log stops at `#233` — gate 3/4 entries need a re-pull |
