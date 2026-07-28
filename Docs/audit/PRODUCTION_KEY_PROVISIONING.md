@@ -90,8 +90,9 @@ cd ~/PX4-Autopilot && make cubepilot_cubeorangeplus_default
 make cubepilot_cubeorangeplus_bootloader     # (target name per the fork)
 
 # 5c. Run the full release pipeline with the CCA private key (default path is already set;
-#     --private-key shown explicitly for clarity). Signs manifest + bundle + bootloader (BOOT008)
-#     with the CCA key, using our RSA-PSS scheme.
+#     --private-key shown explicitly for clarity). Signs the manifest + update bundle with the
+#     CCA key (RSA-PSS). The bootloader (BOOT008) is signed separately by
+#     tools/signer/sign_bootloader.py — not by this pipeline.
 BUILD=~/PX4-Autopilot/build/cubepilot_cubeorangeplus_default
 python tools/pipeline.py \
     $BUILD/cubepilot_cubeorangeplus_default.px4 \

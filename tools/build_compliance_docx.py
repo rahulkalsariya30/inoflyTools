@@ -3,18 +3,20 @@ tools/build_compliance_docx.py
 
 Build the DGCA §7.1 Word deliverables from the Markdown sources under Docs/audit/.
 
-Produces THREE documents:
+Produces TWO documents:
   1. Inofly_Firmware_Security_Compliance_Document.docx  (auditor-facing)
        Certificate + Architecture + §7.1 Mapping + Annexure E + Build Identity + Test Evidence
-  2. Inofly_Firmware_Security_Testing_and_Operations_SOP.docx  (internal reference)
-       Tools Reference + Production Key Provisioning + Test/Demo Runbook
-  3. Inofly_Firmware_Flashing_SOP.docx  (CB-facing flashing SOP)
+  2. Inofly_Firmware_Flashing_SOP.docx  (CB-facing flashing SOP)
        Keys → OpenSSL → signature → upload → connection diagram → bootloader/firmware
        flashing → GCS flow → §7.1 testing tables. Mirrors the the audited reference reference SOP.
 
+(The internal Testing & Operations SOP was retired 2026-07-28; its Markdown sources
+ — TOOLS_REFERENCE.md, PRODUCTION_KEY_PROVISIONING.md, AUDIT_DEMO_SCRIPT.md — remain
+ as standalone internal references and are listed individually in README.md.)
+
 Usage:
-    py -3 tools/build_compliance_docx.py [compliance] [sop] [flashing]
-    (no argument = build all three; name one or more to build selectively —
+    py -3 tools/build_compliance_docx.py [compliance] [flashing]
+    (no argument = build both; name one or more to build selectively —
      e.g. `flashing` alone leaves a hand-finalized compliance docx untouched)
 
 Depends only on python-docx (already installed). No pandoc required.
@@ -70,12 +72,6 @@ COMPLIANCE_SOURCES = [
     "ANNEXURE_E_CONFORMANCE.md",
     "BUILD_IDENTITY.md",
     "TEST_EVIDENCE_PACK.md",
-]
-
-SOP_SOURCES = [
-    "TOOLS_REFERENCE.md",
-    "PRODUCTION_KEY_PROVISIONING.md",
-    "AUDIT_DEMO_SCRIPT.md",
 ]
 
 FLASHING_SOURCES = [
@@ -411,15 +407,13 @@ def build_document(sources, title, subtitle, status, meta, output):
 
 def main():
     import sys
-    targets = {t.lower() for t in sys.argv[1:]} or {"compliance", "sop", "flashing"}
-    unknown = targets - {"compliance", "sop", "flashing"}
+    targets = {t.lower() for t in sys.argv[1:]} or {"compliance", "flashing"}
+    unknown = targets - {"compliance", "flashing"}
     if unknown:
         raise SystemExit(f"unknown target(s): {', '.join(sorted(unknown))} "
-                         "(choose from: compliance, sop, flashing)")
+                         "(choose from: compliance, flashing)")
     if "compliance" in targets:
         build_compliance()
-    if "sop" in targets:
-        build_sop()
     if "flashing" in targets:
         build_flashing()
 
@@ -438,22 +432,6 @@ def build_compliance():
             ("Document date", "2026-07-10"),
         ],
         AUDIT / "Inofly_Firmware_Security_Compliance_Document.docx",
-    )
-
-
-def build_sop():
-    build_document(
-        SOP_SOURCES,
-        "Firmware Security — Testing & Operations SOP",
-        "Tooling, production key provisioning, and the §7.1 test/demo runbook",
-        "Internal reference — not part of the CB submission",
-        [
-            ("Manufacturer", "Inofly"),
-            ("Product", "CubePilot CubeOrange+ (STM32H743), PX4-based firmware"),
-            ("Audience", "Internal engineering / manufacturing"),
-            ("Document date", "2026-07-10"),
-        ],
-        AUDIT / "Inofly_Firmware_Security_Testing_and_Operations_SOP.docx",
     )
 
 
