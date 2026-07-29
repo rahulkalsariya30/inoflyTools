@@ -480,6 +480,49 @@ Cleanup after the matrix: promotion (A-6) already deletes `UPDATE.BIN` on
 the B10.3 pass; confirm the card is clean and the unit reads the ship
 bootloader (`3a404d9a…`) with the latest applied app + promoted manifest.
 
+### Results — bench run 2026-07-29
+
+**B10 matrix PASS on real CubeOrange+** (gate-ON BL `release/b10/`, on-device boot
+hash `136e1801…`). Working sheet: `release/B10_RUN_SHEET.md`.
+
+- **B10.1 refuse `reboot -b` — ✅ PASS.** `reboot -b` booted straight back to the
+  app (~1–2 s BOOT001 verify); **no PX4-BL/DFU port enumerated** (Device Manager →
+  Ports COM & LPT); POST green. The app returning on its own is itself the proof —
+  a stock BL would have parked in the upload loop.
+- **B10.2 refuse USB power-on — ✅ PASS.** Power-on with USB connected (VBUS
+  present) booted the app immediately; no BL enumeration; the app CDC port came up
+  on the normal QGC retry.
+- **B10.3 SD staged update still applies — ✅ PASS (real write).** The unit began
+  in an H17-leftover **inconsistent** state — flash **FW-B `65396bf8…`** under a
+  stale **FW-A** active manifest → POST **reason 4** (code-hash mismatch). Staged
+  **FW-A** (`UPDATE.BIN` `bec9b85c…`) with a **freshly re-dated FW-A manifest**
+  (`aa2cba2c…`, `created_at 2026-07-29T00:54:35Z` — newer than the active
+  `1784603937`, so it beats anti-rollback). The gate-ON bootloader applied it on
+  reboot (running *before* the refuse check), first-boot promotion logged **evt
+  #267 "PROMOTED 0.1"**, and POST **#268 passed**. The write is provably real: POST
+  went from reason-4 to green **against the FW-A manifest**, which can only hold if
+  the flash was rewritten FW-B → FW-A. *(A later `apply_update` re-run showed the
+  app-gate `reason=1` "staged manifest not found" only because the successful
+  promotion had already consumed the staged files — harmless.)*
+- **B10.4 recovery-opens-iff-invalid — ⏭️ skip.** No SWD rig on this unit (per
+  B0/BP4 disposition); the conditional stays a source review.
+- **B10.5 revert to ship (gate-OFF) BL — ✅ PASS.** `bl_update` installed the B9
+  ship bootloader via the signed path — console `BOOT008: bootloader signature
+  verified` → validate → erase → flash → verify → complete (on-card file
+  `66bf50f6…`, on-device `3a404d9a…`). `reboot -b` then **stayed in the upload
+  window** (sustained fast-blink LED + a port enumerated — generic "USB Serial
+  Device (COMx)", no PX4-BL driver name on this host) — i.e. the USB-DFU
+  recovery-of-record window is **restored**, the exact behavior the gate-ON BL
+  refused in B10.1. Normal power cycle then booted the app, POST green.
+
+**Audit (LOG001):** verify **PASS** over **275 entries**, **0 CRC failures**;
+`PROMOTED 0.1` + closing green POSTs (#272/#274) present. Archived to
+`release/b10/bench_archive/audit_log_final_b10.{bin,sig}`.
+
+**Unit end state:** ship gate-OFF BL `3a404d9a…`, app **FW-A `c9f41da8…`**, active
+manifest fresh FW-A (`aa2cba2c…`, 2026-07-29), POST `check_passed=true`. Card clean
+(`inofly/manifest.bin` + audit log only). **B10 / ADR-023 A-7 done.**
+
 ---
 
 ## Sign-off
@@ -544,7 +587,7 @@ enforces, recovery proves the work was reversible.
 | B7 SWD-open (pre-seal) | ✅ **DISPOSITIONED — n/a** | 2026-06-30 | SWD could not be brought up on this rig (see B0/BP4), so the pre-seal SWD-open path was never confirmable here; **dispositioned n/a 2026-06-30** alongside B0. **De-facto recovery path on this unit = USB-DFU, not SWD.** BOOT007 tamper seal still closes both USB and SWD in production (unchanged). |
 | B8 signed `bl_update` (BOOT008) ⭐ | ✅ | 2026-07-01 | **NEW hardening gate — [ADR-025](ARCHITECTURE.md), not a Phase 5b / L1 requirement.** Validated on real CubeOrange+ (BOOT008 app fw flashed, FLASH 95.18%; POST `check_passed=true`, hashes `4c4a34fc…`/`a3e97bae…`; matching `manifest.bin` regenerated for the new app). **Signed→accept:** `BOOT008: bootloader signature verified` → validate → erase → flash → verify → complete; clean reboot, POST green. **All negatives refuse before erase (sector 0 untouched, no erase/flash lines):** byte-flip tampered (`secure_verify ret=0`), zeroed-SIG unsigned (`ret=7`), and **attacker-key** — a structurally valid RSA-PSS signature by the wrong RSA-2048 key (`ret=7`), the load-bearing wrong-key negative proving the gate checks *authenticity* vs the embedded manufacturer pubkey, not signature presence. **Recover:** re-flashed the good signed bootloader → accept → POST green. All 4 fixtures pre-validated offline (manufacturer-verify=FAIL, attacker-verify=PASS). **T11-H closed.** |
 | B9 staged SD update (ADR-023 A-4) ⭐ | ✅ | 2026-07-09 | **Full matrix PASS on real CubeOrange+** (A-4 `c4aa2811eb` + ECC fix `4e1ba38009`). **Apply (B9.2):** staged new fw applied by the BL — POST green, code hash flipped `4c4a34fc…`→`20784925…`, data `a3e97bae…` unchanged. **Refuse (B9.3/B9.4):** tampered byte-flip and **attacker-key** (structurally valid wrong-RSA-2048 sig) both REFUSED with **zero erase** — hashes bit-identical after boot; fixtures pre-validated offline (manufacturer-verify FAIL / attacker-verify PASS). **Idempotence:** reboot with staged file matching flash → ALREADY_APPLIED, prompt boot, POST green. **Power-loss retry (B9.6):** pull mid-write → **found the H7 ECC crash-loop bug (see findings above), fixed, re-run on fixed BL** → unattended re-verify + re-apply on repower, staged image boots POST green (`b405ef40…`/`f05e43d2…` vs its matching manifest). Baseline (B9.5) unchanged; POST-passing check from the prior session closed (multiple green `listener firmware_integrity_status` readouts). Bootloader on unit at close: **fixed A-4 BL 108,160 B, BOOT SHA `3a404d9a…`**. **Re-proven 2026-07-21 on the v4 stack (H16/H17)** — same bootloader, v4 manifests, A-6 promotion closing the app side; apply/refuse/idempotence/power-loss all green, power cut this time confirmed mid-write. See the B9 re-proof table above. |
-| B10 BOOT005 DFU-refuse (ADR-023 A-7) ⭐ | ⬜ pending bench | — | Code + both-state builds done 2026-07-15 (PX4 `99d4a2dbbc`; gate-off 108,160 B == baseline, gate-on 108,168 B). Signed gate-ON artifact at `release/b10/` (BOOT SHA `136e1801…`). Runs once, then revert to ship (gate-OFF) BL per B10.5. **Now unblocked (2026-07-21):** B10.3 needs a v4 artifact pair, which the H16/H17 session produced — stage FW-B from `release/h16/` against the unit's current FW-A, or vice versa. Unit is on FW-A `c9f41da8…` with ship BL `3a404d9a…`. |
+| B10 BOOT005 DFU-refuse (ADR-023 A-7) ⭐ | ✅ | 2026-07-29 | **Matrix PASS on real CubeOrange+** (gate-ON BL `release/b10/`, boot hash `136e1801…`). B10.1 refuse `reboot -b` (no DFU port, app booted through) + B10.2 refuse USB power-on + **B10.3 SD update applied through the gate (real write FW-B `65396bf8…`→FW-A `c9f41da8…`, promotion evt "PROMOTED 0.1", POST green — resolving an H17-leftover flash-vs-manifest mismatch)** + B10.5 revert to ship BL via signed `bl_update` (DFU window restored on `reboot -b`). B10.4 skipped (no SWD). Audit LOG001 PASS over 275 entries, 0 CRC failures. Unit reverted to ship gate-OFF BL `3a404d9a…`, app FW-A, POST green. Details in the B10 Results block above; working sheet `release/B10_RUN_SHEET.md`. **B5/BOOT005 bench exercise now closed** (was the deferred step). |
 
 ---
 
@@ -552,6 +595,7 @@ enforces, recovery proves the work was reversible.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.8 | 2026-07-29 | **B10 (BOOT005 DFU-refuse, ADR-023 A-7) matrix PASS on hardware — the deferred B5 bench exercise is now closed.** Gate-ON BL (`release/b10/`, boot hash `136e1801…`) ran once: `reboot -b` and USB-power-on both refused (no DFU enumeration, app boots through — B10.1/B10.2); the SD staged-update path still applied a signed image through the gate (**B10.3**, a *real* FW-B→FW-A write with A-6 promotion "PROMOTED 0.1" + POST green, which also resolved an H17-leftover flash-vs-manifest mismatch that had POST failing reason 4); reverted to the ship gate-OFF BL via signed `bl_update` and confirmed the USB-DFU window is restored (B10.5). B10.4 skipped (no SWD rig). Audit LOG001 verify PASS over 275 entries, 0 CRC failures (archived `release/b10/bench_archive/`). Added the B10 Results block; B10 status row → ✅. Working sheet `release/B10_RUN_SHEET.md`. This addresses the v1.1/v1.6 "re-confirm the DFU window when BOOT005 lands" caveat. |
 | 1.7 | 2026-07-21 | **B9 re-proven end-to-end on the v4 stack (H16/H17 bench).** Every bootloader leg of B9 re-ran on the ship bootloader `3a404d9a…` against manifest-format-**v4** artifacts, with A-6 promotion completing the app side for the first time (no hand-copied manifest): apply FW-A `c9f41da8…` → FW-B `65396bf8…` with promoted manifest + POST green; tampered and attacker-key images refused **before erase** (unit booted, flash bit-identical); `ALREADY_APPLIED` short-circuit cleanly evidenced (separating it from the B9.1 downgrade confusion); power-loss regression re-run with the cut **operator-confirmed in the write phase**, recovered unattended. Added the B9 re-proof table + orphan-quarantine / retry-loop notes. **Residual T14 (BL-path rollback) now closed app-side** by the v4 `created_at` anti-rollback (H17 rows 1e/1f). B10 row updated: **unblocked** — B10.3's required v4 artifact pair now exists at `release/h16/`. Full session record in [HARDWARE_ACCEPTANCE.md](HARDWARE_ACCEPTANCE.md) §H16/H17. |
 | 1.6 | 2026-07-15 | **Added B10 — BOOT005 DFU-refuse bench matrix (ADR-023 A-7).** `CONFIG_BOOTLOADER_REFUSE_DFU` landed in the bootloader (PX4 `99d4a2dbbc`): when ON, any stay-in-bootloader request is answered by BOOT001 verify-and-boot while a valid signed app is present; the upload loop opens only on an invalid/absent app (recovery). Fail-closed configure guard (flag requires `BOARD_CRYPTO`). Gate-off 108,160 B (== A-4/A-6 baseline, compiled out); gate-on 108,168 B, signed artifact at `release/b10/`. **Ships OFF** per [ADR-024](ARCHITECTURE.md); B10 runs the gate-ON build once (refuse `reboot -b` / refuse USB power-on window / SD staged update still applies / revert to ship BL), addressing the v1.1 "re-confirm the DFU window when BOOT005 lands" caveat. B5 section now points at B10. Header version line corrected (was stale at 0.8). |
 | 1.5 | 2026-07-09 | **B9 full matrix PASS on hardware — and B9.6 found + fixed a real bug.** Apply/refuse/idempotence/baseline all green (B9.2 hash flip to `20784925…`; tampered + attacker-key refused with zero erase). The B9.6 power-pull exposed an **H7 flash-ECC crash loop** (idempotence hash read torn flash pre-erase → bus-fault reset loop, USB never up; recovery = remove card → DFU). Fixed in PX4 `4e1ba38009` (skip idempotence hash when the first word reads erased — first-word-committed-last proves no complete image; erase scrubs bad ECC). B9.6 re-run on the fixed BL (`3a404d9a…`): unattended recovery to a verified image after mid-write power cut. Bench findings recorded (LED phases; B9.1-as-run was a downgrade apply; BL-path rollback residual → A-5). |
