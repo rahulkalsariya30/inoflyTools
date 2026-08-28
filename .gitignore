@@ -125,3 +125,12 @@ Thumbs.db
 # =============================================================
 *.log
 tests/output/
+
+# =============================================================
+# Obsidian
+# =============================================================
+# The repo root doubles as an Obsidian vault for reading Docs/ with backlinks
+# and a graph view. app.json holds the exclusion filters and is worth keeping
+# locally, but workspace.json / cache churn on every pane change — none of it
+# belongs in a compliance repo's history.
+.obsidian/
