@@ -25,6 +25,22 @@ separate party.
 
 ## Start here
 
+**If you have ten minutes** — these two are written in plain language for a
+non-specialist reader, and assume no knowledge of drones or of the Indian
+regulatory scheme:
+
+1. [Docs/audit/EXECUTIVE_SUMMARY.md](Docs/audit/EXECUTIVE_SUMMARY.md) — what
+   the scheme requires in four plain sentences, what was built, and where the
+   evidence sits
+2. [Docs/audit/GLOSSARY.md](Docs/audit/GLOSSARY.md) — every acronym and
+   requirement ID defined, including the ones used throughout this README
+
+A note on reading the longer documents: requirement IDs (`BOOT001`, `PAR001`,
+`POST002`) are stable handles used identically across the plan, the code, the
+tests and the evidence — so any ID can be traced end to end. Decision records
+keep superseded text ~~struck through~~ next to what replaced it, deliberately:
+the reasoning is part of the record, not just the conclusion.
+
 **If you are evaluating the security and certification work:**
 
 | Document | What it is |
