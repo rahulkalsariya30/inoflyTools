@@ -2,10 +2,10 @@
 tools/provisioning/provision_signing_key.py
 
 Provision a MAVLink signing key for GCS-FC pairing via passphrase derivation.
-Requirement: PAIR001 — GCS-FC pairing via MAVLink signing (the audited reference Section 3.2.4)
+Requirement: PAIR001 — GCS-FC pairing via MAVLink signing
 
 WHY this script exists:
-  the audited reference Section 3.2.4 requires that only authorized GCS software can
+  The Annexure E communication requirement is that only authorized GCS software can
   communicate with the drone. PX4 has built-in MAVLink v2 message
   signing — both PX4 and QGC need to share a 32-byte key.
 
@@ -171,7 +171,7 @@ def main():
 
     print("=" * 60)
     print("MAVLink Signing Key Provisioning Tool")
-    print("Requirement: PAIR001 (the audited reference Section 3.2.4)")
+    print("Requirement: PAIR001 (Annexure E - communication requirement)")
     print("=" * 60)
 
     # Step 1: get passphrase

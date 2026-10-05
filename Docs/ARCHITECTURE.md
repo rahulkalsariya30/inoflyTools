@@ -63,7 +63,7 @@ the disagreement is a doc-staleness bug — file an issue).
 7. [Boot sequence — step by step](#7-boot-sequence--step-by-step)
 8. [Firmware update paths](#8-firmware-update-paths)
 9. [DGCA requirement mapping](#9-dgca-requirement-mapping)
-10. [Why we deviate from the audited reference (flash encryption)](#10-why-we-deviate-from-pdrlcint-flash-encryption)
+10. [Why we deviate from the reference implementations (flash encryption)](#10-why-we-deviate-from-the-reference-implementations-flash-encryption)
 11. [Comparison to other architectures](#11-comparison-to-other-architectures)
 12. [Architecture Decision Log](#12-architecture-decision-log)
 13. [Residual risks (acknowledged)](#13-residual-risks-acknowledged)
@@ -83,8 +83,8 @@ requires a recorded entry in §12 and team agreement.
 | L3 | **Target hardware: STM32H743/H753** (CubeOrange+) for initial deployment | §4, hardware on hand |
 | L4 | ~~**Trust anchor: RSA-3072 public key in STM32H7 OTP** (full DER pubkey, ~422 bytes)~~ ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **CURRENT:** RSA-2048 public key **embedded in the bootloader binary** (and in app fw for UPD001 / manifest verification). No OTP burn — CubeOrange+ carrier has no accessible BOOT0; breaking the Hex factory seal is operationally infeasible. | §3, ADR-002, ADR-013, ADR-016 |
 | L5 | ~~**Bootloader is a verifier, not chip-verified** — bootloader's own integrity comes from RDP Level 2, not from runtime signature check (STM32H743 has no authenticating Boot ROM)~~ ⚠️ **AMENDED 2026-05-04 (ADR-013).** ✅ **CURRENT:** bootloader is still a verifier (it checks the firmware signature on every boot — BOOT001) and is still not chip-verified at runtime. Bootloader integrity now comes from a **bootstrap-trust chain** (only path to write sector 0 is `bl_update` from a running, signed app fw) + **tamper-evident sealing** of the airframe and Cube enclosure. | §4.2, ADR-003, ADR-013 |
-| L6 | **No flash encryption (no AES-in-OTP)** for Level 1 — the audited reference-style confidentiality control is not required by DGCA Level 1 | §10, ADR-004 |
-| L7 | **libtomcrypt on NuttX (app fw + bootloader), OpenSSL on host/SITL** — both speak RSA-PSS / SHA-256 interoperably; libtomcrypt is the MCU-sized library already linked into PX4 (no new dependency). Earlier doc revisions said "mbedTLS on hardware"; that wording was always stale — the actual library is libtomcrypt. ADR-005 reworded 2026-05-07 to match. | PROJECT_NOTES.md, ADR-005 |
+| L6 | **No flash encryption (no AES-in-OTP)** for Level 1 — a confidentiality control of this kind is not required by DGCA Level 1 | §10, ADR-004 |
+| L7 | **libtomcrypt on NuttX (app fw + bootloader), OpenSSL on host/SITL** — both speak RSA-PSS / SHA-256 interoperably; libtomcrypt is the MCU-sized library already linked into PX4 (no new dependency). Earlier doc revisions said "mbedTLS on hardware"; that wording was always stale — the actual library is libtomcrypt. ADR-005 reworded 2026-05-07 to match. | ADR-005 |
 | L8 | **Audit log: per-file RSA-2048 signing**, public-key encryption of SHA-256 hash | SECURITY_PLAN.md §LOG001, ADR-006, ADR-016 |
 | L9 | ~~**Static parameter compilation** for compliance-critical params (zero-window protection)~~ ⚠️ **AMENDED 2026-05-11 (ADR-019 + ADR-020).** ✅ **CURRENT:** Compliance-protected params split into two kinds. **CAPPED** (mission-tunable caps — `GF_MAX_VER_DIST`, `GF_MAX_HOR_DIST`, `MPC_XY_VEL_MAX`): compiled value is a ceiling; operator may `param_set v` for `v ∈ (0, ceiling]`; RAM-only, not persisted; boot value is 0; pre-arm blocks until every CAPPED row is `> 0`; over-cap rejection raises `COMPLIANCE_PARAM_VIOLATION` with ceiling in message. **LOCKED** (type-cert configuration — `SYS_AUTOSTART`, `CA_AIRFRAME`, `MAV_SIGN_CFG`): compiled value is the registered value; firmware seeds it at boot; **all** operator writes are rejected; pre-arm skips LOCKED rows; every write attempt logs a `COMPLIANCE_PARAM_VIOLATION` with detail `attempted=X registered=Y (LOCKED)`. Static compilation of values into the `.compliance_params` table (covered by `data_hash`) is unchanged. | SECURITY_PLAN.md §PAR001, ADR-007, ADR-019, ADR-020 |
 | L10 | **MAVLink signing with `SHA256(passphrase)` key derivation** for GCS-FC pairing | SECURITY_PLAN.md §PAIR001, ADR-008 |
@@ -196,7 +196,7 @@ forging signatures.
   additional ECIES or RSA layer for the audit-log encryption use case.
   Single-primitive simplicity won.
 - **RSA-2048 vs RSA-3072:** RSA-2048 meets DGCA Level 1 (matches the
-  the audited reference reference) and produces smaller artifacts (256-byte
+  the audited reference) and produces smaller artifacts (256-byte
   signatures vs 384, ~294-byte SPKI DER vs ~422). Smaller artifacts
   matter most in the bootloader — sector 0 is 128 KB on STM32H743 and
   every kilobyte of crypto-library footprint comes out of the
@@ -995,8 +995,8 @@ updates**, not **secrecy of checksum values**.
    - ~~DFU (Path A) — closed by BOOT003 in production~~ ✅ **DFU (Path A) — closed by software DFU-refuse in the secure bootloader (ADR-014); SWD path blocked by tamper-evident sealing of airframe + Cube (ADR-013)**
 4. Show that the trust anchor ~~(OTP pubkey)~~ ✅ **(bootloader-embedded pubkey)** cannot be replaced ~~(write-once silicon)~~ ✅ **without already holding the manufacturer's private key (sector 0 only writable via `bl_update` from a running, signed app fw — ADR-015)**.
 
-This is a **stronger property** than the audited reference's flash encryption
-approach. the audited reference hides the storage so attackers can't read or coherently
+This is a **stronger property** than the reference flash-encryption
+approach. That design hides the storage so attackers can't read or coherently
 write to it. We expose the storage but cryptographically authenticate
 it. Either approach satisfies the requirement.
 
@@ -1019,13 +1019,12 @@ Detailed mapping is in [SECURITY_PLAN.md](../SECURITY_PLAN.md). Quick summary:
 
 ---
 
-## 10. Why we deviate from the audited reference (flash encryption)
+## 10. Why we deviate from the reference implementations (flash encryption)
 
-the audited reference reference implementations (per the audit docs in
-[Docs/](../Docs/)) use AES-128 with the key stored in OTP to **encrypt
+Some reference implementations use AES-128 with the key stored in OTP to **encrypt
 flash contents**. Our architecture deliberately does NOT include this.
 
-### 10.1 What the audited reference does
+### 10.1 What the reference design does
 
 ```
 [OTP: AES-128 key]   ← write-once
@@ -1037,7 +1036,7 @@ flash contents**. Our architecture deliberately does NOT include this.
 [Firmware checksums embedded in encrypted flash]
 ```
 
-the audited reference's protection of registered checksums is **confidentiality-based**:
+That approach protects registered checksums through **confidentiality**:
 - Attacker can't read the checksums (encrypted)
 - Attacker can't write coherent replacement (no AES key to encrypt with)
 - CRP (RDP equivalent) blocks external flash readout
@@ -1076,7 +1075,7 @@ Our protection is **authenticity-based**:
 
 ### 10.3 Why our approach is sufficient (and arguably better) for DGCA Level 1
 
-| Property | the audited reference approach | Our approach |
+| Property | Reference approach | Our approach |
 |---|---|---|
 | **DGCA §4.1.2 requirement (storage authorization)** | ✅ Met via confidentiality | ✅ Met via authenticity |
 | **Confidentiality of firmware bytes** | ✅ Provided | ❌ Not provided (~~RDP L2 blocks readout~~ ✅ tamper-evident seal blocks SWD-readout, but flash bytes are not encrypted) |
@@ -1133,7 +1132,7 @@ production secure-boot pattern.
 | ~~**Inofly (this project)** on STM32H743~~ | ~~RSA-3072 pubkey in STM32H7 OTP~~ | ~~**No** — bootloader integrity from RDP L2, not runtime sig check~~ | ~~DGCA Level 1~~ |
 | **Inofly (this project)** on STM32H743 ✅ **CURRENT 2026-05-04 (ADR-013), key-size amended 2026-05-06 (ADR-016)** | RSA-2048 pubkey **embedded in bootloader binary** | **No** — bootloader integrity from **bootstrap-trust chain + tamper-evident sealing**, not runtime sig check (same constraint as before: STM32H743 has no authenticating Boot ROM) | DGCA Level 1 |
 | **ArduPilot** (production firmware, multi-vendor) | Up to 10 RSA pubkeys embedded in bootloader binary | **No** — bootloader integrity from chain-of-trust + (optional) software DFU-refuse | Hundreds of thousands of fielded units (the architectural pattern we adopted in ADR-013) |
-| **the audited reference (audit reference)** | AES-128 in OTP + RSA pubkey embedded in firmware | (Bootloader stores firmware hash; design unclear from reference) | Reference implementation |
+| **Industry reference implementation** | AES-128 in OTP + RSA pubkey embedded in firmware | (Bootloader stores firmware hash; design unclear from reference) | Reference implementation |
 
 **Key observation:** every production secure-boot system roots trust
 in silicon **or in an operationally-controlled boot chain**. The
@@ -1188,7 +1187,7 @@ key than with multiple.
 > chose RSA-3072 over RSA-2048 for beyond-2030 NIST headroom. ADR-016
 > reverses that choice: production now uses **RSA-2048** for smaller
 > on-device artifacts (especially in the bootloader sector-0 budget)
-> and tighter alignment with the the audited reference audit reference. The
+> and tighter alignment with the audited reference. The
 > RSA-vs-ECDSA half of this ADR (single primitive supporting both
 > sign and public-key-encrypt) is **unchanged** and still load-bearing.
 > Original text preserved below for traceability.
@@ -1196,7 +1195,7 @@ key than with multiple.
 ~~**Decision:** Use RSA-3072 PSS for all signatures.~~
 
 ~~**Alternatives considered:**~~
-- ~~RSA-2048 (the audited reference reference uses this) — rejected. NIST
+- ~~RSA-2048 (the audited reference uses this) — rejected. NIST
   recommends 3072+ for use beyond 2030.~~
 - ECDSA P-256 — rejected. Doesn't support public-key encryption,
   would require additional crypto layer for audit-log use case.
@@ -1233,7 +1232,7 @@ verification of the bootloader.
 for DGCA Level 1. Defer to BOOT004 in a future phase if needed.
 
 **Alternatives considered:**
-- Add AES flash encryption matching the audited reference pattern — rejected for
+- Add AES flash encryption matching the reference pattern — rejected for
   Level 1.
 - Use STM32H7 hardware crypto accelerator (CRYP) for runtime flash
   decryption — deferred (BOOT004).
@@ -1294,7 +1293,7 @@ verify.
 - Per-file signing with a separate log-signing keypair — rejected.
   More keys to manage; covered by single-keypair decision (ADR-001).
 
-**Rationale:** No private key on device; matches the audited reference Section 8
+**Rationale:** No private key on device; matches the audited reference
 audit-logging pattern; simpler manufacturer-side verification flow.
 
 ### ADR-007 — ~~Static parameter compilation for compliance-critical params~~ (2026-04-25) ⚠️ **AMENDED 2026-05-11 by ADR-019 — enforcement model changed from zero-window to cap-semantics**
@@ -1316,10 +1315,10 @@ Block `param_set` for these parameters at the parameter library level.
 
 **Alternatives considered:**
 - Signature-gated runtime writes — rejected. Race window between sig
-  check and write; larger TCB; no audit precedent in the audited reference.
+  check and write; larger TCB; no audit precedent in the reference designs.
 
 **Rationale (original, partially retired):** Zero-window protection (write is rejected before any
-check completes). Smaller TCB. Matches the audited reference pattern.
+check completes). Smaller TCB. Matches the reference pattern.
 
 ### ADR-008 — MAVLink signing via SHA256(passphrase) key derivation (2026-04-28)
 
@@ -1329,13 +1328,13 @@ passphrase entered into provisioning tool and into QGC; both derive
 the same key.
 
 **Alternatives considered:**
-- Custom 8-byte UID (the audited reference pattern) — rejected. Weaker than 32-byte
+- Custom 8-byte UID (reference pattern) — rejected. Weaker than 32-byte
   SHA-256; would require building a custom auth layer.
 - Per-drone random key + provisioning bootstrap — rejected. More
   complex operator workflow.
 
 **Rationale:** Reuses PX4/QGC infrastructure (no custom auth layer);
-SHA-256 derivation is stronger than the audited reference's 8-byte UID; simple operator
+SHA-256 derivation is stronger than the reference 8-byte UID; simple operator
 flow (one passphrase shared between provisioning tool and QGC).
 
 ### ADR-009 — ~~POST in app firmware (SITL) and bootloader (hardware)~~ (2026-04-29) ⚠️ **SUPERSEDED 2026-05-10 by ADR-018**
@@ -1681,7 +1680,7 @@ scoped to key size only.
   bootloader features without forcing module strips on the app fw
   side. App fw artifact size also drops (smaller embedded pubkey,
   smaller signature in the manifest, smaller `.fwbundle`).
-- **Audit alignment.** the audited reference and the audited reference reference designs both use
+- **Audit alignment.** The reference designs both use
   RSA-2048. Matching them removes an explanation step in the auditor
   conversation ("why are you stronger than the reference?") and
   removes RSA-3072 as a *differentiator we have to defend* in audit.
@@ -1830,7 +1829,7 @@ different long-term consequences and the choice has not been made:
   enable `CONFIG_CRYPTO=y` in NuttX. Accept ~?? KB of framework code
   and the existence of two parallel key paths (PX4 `keystore_backend`
   and our embedded `manufacturer_pubkey.h`). Pro: uses PX4-blessed
-  wiring; matches the pattern the audited reference-style audits expect. Con:
+  wiring; matches the pattern these audits expect. Con:
   bigger FLASH cost on a 97.48 %-full image; con: two key paths
   invite drift.
 
@@ -1963,7 +1962,7 @@ blob — it does not satisfy DGCA's per-part requirement, and it gives
 no operational handle to distinguish "param table tampered" from
 "code tampered." Splitting at the `.compliance_params` section
 boundary is the smallest split that produces this signal, aligns with
-the reference implementations audit precedent, and is implementable purely with
+audit precedent, and is implementable purely with
 linker symbols (no extra section bookkeeping).
 
 For (2): The original `--code-bin / --data-bin` design assumed
@@ -2033,7 +2032,7 @@ gates.
 - SECURITY_PLAN.md POST002/POST003 sections must reference `--elf`
   and ADR-018 (already done in the same change set).
 - "POST will move into the bootloader for Phase 5b" wording is
-  retired everywhere (PROJECT_NOTES.md, SECURITY_PLAN.md Phase 5b table,
+  retired everywhere (SECURITY_PLAN.md Phase 5b table,
   ARCHITECTURE.md L11 + ADR-009).
 - Phase 5b deliverables for POST in the bootloader (any line item
   about bootloader hash check) are removed; only the BOOT001
@@ -2249,7 +2248,7 @@ setter (invasive across PX4) or produce 3+ spurious audit entries
 every boot. Accepting writes that match the registered value is a
 true no-op (the value doesn't change); the compliance property —
 *operator cannot move the certified value away* — is preserved.
-This matches the the audited reference reference pattern (locked airworthiness
+This matches the reference pattern (locked airworthiness
 params reject *changes*, not byte-identical re-writes).
 
 **Why LOCKED rejection (only) is audit-logged.** A CAPPED within-cap
@@ -2260,15 +2259,13 @@ exists for. A LOCKED write where `v == registered` is a semantic
 no-op and isn't logged. Detail string for rejections distinguishes
 from CAPPED over-cap: `"attempted=X registered=Y (LOCKED)"`.
 
-**Prior art / alignment.** The the audited reference DGCA-compliance reference
-implementation (also covered by the the audited reference audit we align with) splits
-its protected-parameter set the same way: locked-by-firmware
+**Prior art / alignment.** DGCA-compliance reference implementations
+split their protected-parameter set the same way: locked-by-firmware
 (bootloader, code checksum, embedded pubkey) vs operator-capped
 (vertical geofence 120 m, geofence radius, datalink-loss threshold,
 RTL/failsafe actions). The locked set in our table extends this
 pattern to airframe identity and pairing policy, which are
-type-cert-fixed in the same sense. See
-[`reference-vendor.example/blog/dgca-qci/`](https://reference-vendor.example/blog/dgca-qci/).
+type-cert-fixed in the same sense.
 
 **Alternatives considered.**
 
@@ -2704,7 +2701,7 @@ bootloader there is no boot-time signature net to catch a bad write.
 delivering an authorized update are **USB** (primary, reliable) and
 **telemetry radio** (SiK / MAVLink, the wireless option). Companion-computer,
 WiFi-bridge, and SD-card-OTA paths are **deferred to productization**, not
-pursued now. Rationale: this matches the audit-reference peer — the audited reference ships
+pursued now. Rationale: this matches the audit-reference peer, which ships
 **USB-wired signed `.apj` flashing with verify-before-flash and no OTA** — and
 keeps hardware scope to what we already have (USB cable + the SiK radio for
 H8/PAIR001). The app-fw-mediated apply path (this ADR) is **transport-agnostic**,
@@ -3009,7 +3006,8 @@ classification* (load-bearing → defense-in-depth) and *sequencing* (standalone
 bootloader image: `bl_update.cpp` only sanity-checks the vector table
 (SP-in-RAM, reset-vector-in-flash), then `up_progmem_eraseblock(0)` +
 `up_progmem_write`. Any header-valid binary on SD is flashed to sector 0.
-[ADR-022](#adr-022) had moved the bootloader out of the signed app-fw ROMFS to
+[ADR-022](#adr-022--bootloader-as-sd-card-one-shot-at-factory-executed-2026-05-24-2026-05-12-decided-amends-adr-015)
+had moved the bootloader out of the signed app-fw ROMFS to
 a loose SD file, so the app-fw signature no longer transitively covers it. On a
 deployed unit the bootloader-replacement path (threat-model T11/T12') was closed
 by **access control + the BOOT007 tamper seal**, *not by cryptography*: only a
@@ -3172,6 +3170,6 @@ For project-specific requirement IDs (CHK001, BOOT001, etc.), see
 | 1.0 | 2026-04-29 | Initial lockdown. Captures all architectural decisions made through ADR-012. |
 | 1.1 | 2026-04-29 | Added §5.5 (Why POST and RDP L2 are both needed) and §8.4 (How updates work on a chip locked by RDP L2 — internal-vs-external writes, WRP-locked bootloader region, factory provisioning sequence). No architectural changes; expansions of existing decisions to address common auditor questions. |
 | 1.5 | 2026-06-05 | No new ADR — implementation + transport fixes recorded for traceability. (1) **secure_boot autostart:** `secure_boot start` wired into CubeOrange+ `boards/cubepilot/cubeorangeplus/init/rc.board_extras` and SITL `init.d-posix/rcS`, so the app-firmware POST (POST002/003, ADR-018) and the audit logger (LOG001) run on **every** boot rather than only when started by hand. This realises the "POST on every boot" property already described in §7 / SECURITY_PLAN; previously the app-firmware POST was bench-started manually. A dormant logger was also the root cause of the GCS Install-on-Drone timeout + empty live panel on hardware. PX4 fork `354696551e`; verified on CubeOrange+ and SITL (SIH). (2) **BUG #7 (QGC MAVLink-FTP):** the GCS custom controllers now send **absolute** `/fs/microsd/inofly/...` FTP paths because PX4 `mavlink_ftp` `_root_dir` is empty (`PX4_ROOTFSDIR`) on NuttX — a QGC/transport fix (inoflyGCU `6351f519d`), not architectural. No change to the chain of trust, keys, the POST signature/hash split, or the compliance-param model. |
-| 1.4 | 2026-05-11 | Added ADR-020 (CAPPED/LOCKED kind split, amends ADR-019). Surfaced during SITL §6/§7 walkthrough prep: `CA_AIRFRAME` ceiling=0 made it unsettable under ADR-019 cap-semantics. Root cause: three of the canonical-6 params (`SYS_AUTOSTART`, `CA_AIRFRAME`, `MAV_SIGN_CFG`) are certificate-fixed configuration selectors, not safety caps. New `kind` field on `compliance_param_def_t`; CAPPED rows behave as ADR-019; LOCKED rows boot-seed the registered value, reject all writes, are skipped by the pre-arm gate, and log every write attempt to the audit log. Aligned with the audited reference reference (locked-vs-capped split is the same pattern). No change to flash-table `data_hash` coverage, single-keypair, bootstrap-trust, or POST. |
+| 1.4 | 2026-05-11 | Added ADR-020 (CAPPED/LOCKED kind split, amends ADR-019). Surfaced during SITL §6/§7 walkthrough prep: `CA_AIRFRAME` ceiling=0 made it unsettable under ADR-019 cap-semantics. Root cause: three of the canonical-6 params (`SYS_AUTOSTART`, `CA_AIRFRAME`, `MAV_SIGN_CFG`) are certificate-fixed configuration selectors, not safety caps. New `kind` field on `compliance_param_def_t`; CAPPED rows behave as ADR-019; LOCKED rows boot-seed the registered value, reject all writes, are skipped by the pre-arm gate, and log every write attempt to the audit log. Aligned with the audited reference (locked-vs-capped split is the same pattern). No change to flash-table `data_hash` coverage, single-keypair, bootstrap-trust, or POST. |
 | 1.3 | 2026-05-11 | Added ADR-019 (PAR001 cap-semantics with boot-at-zero + pre-arm gate, supersedes ADR-007 enforcement model). Marked ADR-007 as amended; updated lockdown-table row L9 (zero-window → cap-semantics with strikethrough + ✅ CURRENT block); updated §6.2 row "Individual flight parameters (most)" wording; added cross-ref note in ADR-013 "What this does NOT change" list and §14.4 future-hardware list. The set of compliance-protected parameters and the `.compliance_params`/`data_hash` chain are unchanged; only the runtime enforcement model changes from "param_set blocked" to "param_set v ≤ ceiling accepted in RAM, not persisted, boot-at-zero, pre-arm gate." |
 | 1.2 | 2026-05-04 | Partial amendment. Added amendment notice (top), flagged lockdown rows L4/L5/L12/L13 as superseded, added new lockdown rows L14/L15, marked ADR-003/010/011 with supersession pointers, appended ADR-013 (bootstrap-trust + tamper-evident sealing), ADR-014 (software DFU-refuse), ADR-015 (bl_update / ROMFS-bundled bootloader). Forcing function: CubeOrange+ has no externally accessible BOOT0 button on shipped carriers, making OTP write / RDP burn / WRP option-byte set operationally infeasible. **Convention:** retired material in §3–§11 is rendered in `~~strikethrough~~` (or a 🚫 RETIRED label for code-block diagrams that markdown won't strike) and immediately followed by an ✅ CURRENT replacement block. Sections touched: §1 (lockdown table + open-items list), §2.1, §2.2, §3.2, §4.1, §4.2, §4.3 (full strike + current), §4.4 (full strike + current), §5.1 (diagram strike + current), §5.2, §5.3, §5.4, §5.5 (entire RDP framing relabeled, all 5 failure modes amended, layers-stack diagram strike + current), §6.3, §7 (boot sequence step 4, attacker-cannot-skip steps 4 + 7), §8.1 (Path A post-state), §8.3 (gating table Path A row), §8.4 (full strike + current update flow + post-RDP regions table + Phase 5b sequence), §9.1 (auditor walk-through), §9.2 (root-of-trust + bootloader-hardening rows), §10.2 (deviation diagram strike + current), §10.3 (table cells), §10.4 (BOOT004 + OTP space note), §11 (Inofly comparison row + new ArduPilot row + key-observation paragraph), §13 (residual risks: chip-decap, dev-boards, confidentiality rows + new manufacturer-signed-malicious-bootloader-push row), §14.4 (per-chip-family change list), Appendix A→companion-docs table (RDP_BURN_RUNBOOK.md retired pointer), ADR-001 (deployment sub-claim amendment). |

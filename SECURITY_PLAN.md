@@ -44,7 +44,7 @@ enforce integrity at boot. We are NOT the Certification Body (CB).
 
 ## Architecture — Single Keypair
 
-Based on the the audited reference-audited compliance documents (the audited reference/the audited reference):
+Based on the audited reference compliance documentation:
 
 | Component | Key | Purpose |
 |-----------|-----|---------|
@@ -250,12 +250,12 @@ POST003 on the next boot). Cap-semantics on top of that gives the
 operator the per-flight flexibility real missions need, without
 weakening the regulatory ceiling.
 
-### LOG001 — Per-file RSA signed audit log (the audited reference Section 8)
+### LOG001 — Per-file RSA signed audit log
 All security events are logged to persistent storage (SD card) as 132-byte
 binary entries. Each entry has CRC32 integrity checking. The entire log file
 is signed using per-file RSA-2048 encryption.
 
-**Per-file RSA signing (the audited reference Section 8 — implemented):**
+**Per-file RSA signing (implemented):**
 1. FC writes 132-byte entries to `audit_log.bin` (signature field zeroed, CRC32 only)
 2. After each entry write, FC computes SHA-256 of the complete `audit_log.bin`
 3. FC encrypts the 32-byte hash with the embedded RSA-2048 **public key** (PKCS#1 v1.5)
@@ -263,14 +263,14 @@ is signed using per-file RSA-2048 encryption.
 5. Manufacturer verifies offline: decrypts `.sig` with **private key**, compares SHA-256 hashes
 6. GCS downloads both `.bin` log and `.sig` via MAVLink FTP (two buttons in Audit Log panel)
 
-**Why RSA for log signing:** the audited reference Section 8 requires public-key encryption
+**Why RSA for log signing:** The audited reference scheme requires public-key encryption
 of the log hash. RSA-2048 supports encryption with the public key (ECDSA
 does not). Using the same RSA-2048 keypair for both firmware signing and
 log signing keeps the architecture to a single keypair.
 
 **No per-entry signing:** Previous implementation used per-entry ECDSA
 signatures with a provisioned private key. This has been replaced by
-per-file RSA, which matches the audited the audited reference approach and eliminates the
+per-file RSA, which matches the audited reference approach and eliminates the
 need for a private key on the FC.
 
 Events logged:
@@ -320,7 +320,7 @@ the rolled-back flash, arming stays blocked.
 Full mechanism, bench evidence (B9 matrix incl. power-loss recovery), and
 rationale: [Docs/ARCHITECTURE.md ADR-023](Docs/ARCHITECTURE.md).
 
-### PAIR001 — GCS-FC pairing via MAVLink signing (the audited reference Section 3.2.4)
+### PAIR001 — GCS-FC pairing via MAVLink signing
 Only authorized GCS software can communicate with the drone. Implemented
 using PX4's built-in MAVLink v2 message signing (both PX4 and QGC have
 native support).
@@ -357,7 +357,7 @@ fingerprint lets the provisioning tool warn if the same passphrase is
 reused across drone-ids.
 
 **Why MAVLink signing instead of custom 8-byte UID:**
-the audited reference describes an 8-byte UID, but MAVLink signing uses a 32-byte key (SHA-256),
+The reference design describes an 8-byte UID, but MAVLink signing uses a 32-byte key (SHA-256),
 which is strictly more secure. The security property is identical: only a GCS
 with the matching key can control the drone. Using the existing PX4/QGC signing
 infrastructure avoids building a custom authentication protocol.
@@ -852,9 +852,9 @@ full rationale and prior-art comparison (ArduPilot pattern).
 
 | Usage | Algorithm | Notes |
 |-------|-----------|-------|
-| Signing key | RSA-2048 | NIST SP 800-57 acceptable through 2030; matches the audited reference reference (amended 2026-05-06, ADR-016 — was RSA-3072) |
+| Signing key | RSA-2048 | NIST SP 800-57 acceptable through 2030; matches the audited reference (amended 2026-05-06, ADR-016 — was RSA-3072) |
 | Signature scheme | RSA-PSS (SHA-256, MGF1-SHA256, salt length 32) | Modern provably-secure RSA signature, NIST SP 800-131A. Saltlen=32 is the project-wide convention applied uniformly to every signer (signer.py, toc_sign.py, export_manifest.py) and verifier (device OpenSSL/libtomcrypt, QGC BCrypt). |
-| Log signing | RSA-2048 public key encryption | Per-file: FC encrypts log hash with public key (the audited reference Section 8) |
+| Log signing | RSA-2048 public key encryption | Per-file: FC encrypts log hash with public key |
 | Hash | SHA-256 | Minimum per DGCA Level 1 |
 | Key encoding (storage) | PEM | |
 | Key encoding (firmware) | DER SubjectPublicKeyInfo | ~294 bytes for RSA-2048 |

@@ -180,7 +180,7 @@ REQUIREMENTS = {
     "PAR001": Requirement(
         req_id="PAR001",
         description="Compliance parameter protection (static compilation)",
-        dgca_clause="Parameter Protection (the audited reference Section 3.1b)",
+        dgca_clause="Parameter Protection (DGCA Section 7.1(c))",
         status="done_sitl",
         implementation=[
             "src/modules/secure_boot/compliance_params.h — parameter table",
@@ -192,8 +192,8 @@ REQUIREMENTS = {
     ),
     "LOG001": Requirement(
         req_id="LOG001",
-        description="Per-file RSA signed audit log (the audited reference Section 8)",
-        dgca_clause="Audit Logging (the audited reference Section 8)",
+        description="Per-file RSA signed audit log",
+        dgca_clause="Audit Logging (DGCA Section 7.1 - log file signing)",
         status="done_sitl",
         implementation=[
             "src/modules/secure_boot/SecurityAuditLogger.hpp/.cpp",
@@ -217,8 +217,8 @@ REQUIREMENTS = {
     ),
     "PAIR001": Requirement(
         req_id="PAIR001",
-        description="GCS-FC pairing via MAVLink signing (the audited reference Section 3.2.4)",
-        dgca_clause="GCS Locking (the audited reference Section 3.2.4)",
+        description="GCS-FC pairing via MAVLink signing",
+        dgca_clause="GCS Locking (Annexure E - communication requirement)",
         status="done_sitl",
         implementation=[
             "PX4 built-in MAVLink v2 message signing (MavlinkSignControl)",

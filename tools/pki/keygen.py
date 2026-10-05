@@ -18,7 +18,7 @@ WHY RSA-2048?
 
 WHY not ECDSA?
   - ECDSA is signature-only — cannot encrypt with public key
-  - the audited reference Section 8 requires public-key encryption of log file hashes
+  - The audited reference scheme requires public-key encryption of log file hashes
   - RSA supports both operations with one keypair
 
 NEVER share or commit the private key.

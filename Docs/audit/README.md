@@ -24,7 +24,7 @@ Auditor-facing documentation and demo setup for the DGCA Certification Scheme **
 | 7 | [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md) | How the system works — components, trust model, boot/update flows, diagrams. Read first to orient. |
 | 8 | [AUDIT_DEMO_SCRIPT.md](AUDIT_DEMO_SCRIPT.md) | Copy-paste live-demo runbook (steps D0–D9) for the CB witness session. |
 | 9 | [TOOLS_REFERENCE.md](TOOLS_REFERENCE.md) | What each tool/script does, mapped to requirement and demo step. |
-| 10 | [FIRMWARE_FLASHING_SOP.md](FIRMWARE_FLASHING_SOP.md) | CB-facing Firmware Flashing SOP (mirrors the the audited reference reference SOP's structure): keys → OpenSSL → signature → upload → connection diagram → bootloader/firmware flashing → QGC flow → §7.1 testing tables. Hardware-only. Built standalone as `Inofly_Firmware_Flashing_SOP.docx` (`py -3 tools/build_compliance_docx.py flashing`). |
+| 10 | [FIRMWARE_FLASHING_SOP.md](FIRMWARE_FLASHING_SOP.md) | CB-facing Firmware Flashing SOP (mirrors the reference SOP structure): keys → OpenSSL → signature → upload → connection diagram → bootloader/firmware flashing → QGC flow → §7.1 testing tables. Hardware-only. Built standalone as `Inofly_Firmware_Flashing_SOP.docx` (`py -3 tools/build_compliance_docx.py flashing`). |
 
 Supporting internal references (not auditor-facing but authoritative): [../ARCHITECTURE.md](../ARCHITECTURE.md) (decision log), [../SECURITY_PLAN.md](../SECURITY_PLAN.md), [../HARDWARE_ACCEPTANCE.md](../HARDWARE_ACCEPTANCE.md) (bench evidence), [../BOOTLOADER_BRINGUP.md](../BOOTLOADER_BRINGUP.md), [../compliance_report.txt](../compliance_report.txt) (test matrix).
 

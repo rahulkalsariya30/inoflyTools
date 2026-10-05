@@ -80,20 +80,15 @@ setup) and the param-guard enforcement code.
   QGC instability.
 - QGC (InoflyGCS) crashed intermittently — bench tooling instability.
 
-### Architectural finding from the audited reference doc review (open ADR decision)
+### Architectural finding on registered-checksum storage (open ADR decision)
 
-Reference implementations reviewed during scoping. **Both
-reference vendors store the registered checksum *inside* the
-firmware/flash**, not on the SD card:
-- Reference implementations store the checksum inside the
-  firmware.
-- They store checksums inside the
-  flight controller hardware only, in internal flash.
+Industry reference implementations reviewed during scoping store the
+registered checksum **inside the MCU flash**, not on removable media.
 
 Our current design (signed `manifest.bin` on the **SD card**) is a
 documented divergence. The signature still provides integrity, but the
-DGCA wording *"stored securely **in the flight module**"* is interpreted
-as flash, not SD, by both reference vendors.
+DGCA wording *"stored securely **in the flight module**"* is read as
+flash rather than SD by the reference implementations we compared against.
 
 **Open ADR decision to make before hardware-final:**
 1. **Keep SD + compensating controls** (signature + FTP write-deny on
@@ -101,7 +96,8 @@ as flash, not SD, by both reference vendors.
    argument vs the in-flash reference interpretation. Lower
    implementation cost; carries "removable media" audit risk.
 2. **Move `manifest.bin` into a dedicated flash region** (matching
-   the audited reference). Higher implementation cost; matches reference exactly.
+   the reference implementations). Higher implementation cost; matches
+   the reference exactly.
 
 Does **not** block H3 either way.
 
@@ -180,7 +176,7 @@ Audit log: release\sd\audit_log.bin  (1 entries)
 Status: OK - every entry parsed and passed CRC.
 ```
 
-This is the **canonical LOG001 / the audited reference §8 property** proven on
+This is the **canonical LOG001 property** proven on
 hardware for the first time: the manufacturer, using only the
 offline private key and the downloaded `.bin` + `.sig` pair,
 recovers the FC's signed SHA-256 and verifies it matches the log

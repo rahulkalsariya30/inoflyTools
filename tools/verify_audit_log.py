@@ -3,7 +3,7 @@ tools/verify_audit_log.py
 
 Offline verification of a drone-produced audit log.
 
-The flight controller signs the audit log per the audited reference Section 8:
+The flight controller signs the audit log as follows:
   1. FC writes 316-byte entries to audit_log.bin (signature field zero, CRC32 only).
   2. After each write, FC computes SHA-256 of the complete audit_log.bin.
   3. FC encrypts the 32-byte hash with the embedded RSA-2048 PUBLIC key

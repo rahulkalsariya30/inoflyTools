@@ -3,7 +3,7 @@ tests/compliance/test_PAIR001_gcs_pairing.py
 
 Compliance tests for PAIR001 — GCS-FC pairing via MAVLink signing
 
-Requirement: PAIR001 (the audited reference Section 3.2.4)
+Requirement: PAIR001 (Annexure E - communication requirement)
   - Each drone must have a unique MAVLink signing key
   - Signing key file must be exactly 40 bytes (32-byte key + 8-byte timestamp)
   - MAV_SIGN_CFG parameter must be locked to 1 (non-USB signing required)

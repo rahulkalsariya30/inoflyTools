@@ -669,7 +669,7 @@ operationally with detectable evidence.
 
 ### 7.5 Why flash encryption is not required
 
-the audited reference reference architectures use AES-128 in OTP to **encrypt
+Some reference architectures use AES-128 in OTP to **encrypt
 flash contents**. This is a *confidentiality* control: it protects
 the firmware binary from being read out. Our chain provides
 *integrity and authenticity* — the property DGCA Level 1 actually
@@ -696,7 +696,7 @@ Units returning with broken seals are quarantined on RMA receipt.
 Flash encryption would only add value against attack scenarios already
 out of Level 1 scope (chip decap, advanced fault injection, and the
 narrow case of an attacker who reads flash without re-flying the unit
-afterward). For productization or the audited reference parity, flash encryption can
+afterward). For productization or reference parity, flash encryption can
 be added later as BOOT004 — it is not required for certification.
 
 ---

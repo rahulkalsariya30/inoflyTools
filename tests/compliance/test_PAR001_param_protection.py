@@ -19,7 +19,7 @@ Requirement: PAR001
   - Values (ceilings) must be within safe/sane ranges
   - Table-driven: adding a parameter requires only editing the header
 
-Reference: the audited reference-audited compliance document Sections 3.1(b) and 7;
+Reference: DGCA Section 7.1(c) (secure change of flight parameters);
 Docs/ARCHITECTURE.md ADR-019 for the cap-semantics rationale.
 """
 

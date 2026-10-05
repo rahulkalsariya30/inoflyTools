@@ -12,7 +12,7 @@ Requirement: LOG001
   - Sequence numbers must be monotonically increasing
   - Entry format must match the binary struct defined in security_audit_entry.h
 
-Per-file RSA signing (the audited reference Section 8):
+Per-file RSA signing:
   - FC computes SHA-256 of entire audit_log.bin
   - Encrypts hash with RSA-2048 public key (PKCS#1 v1.5), saves as audit_log.sig (256 bytes)
   - Manufacturer verifies offline: decrypt .sig with private key, compare SHA-256 hashes
@@ -55,7 +55,7 @@ RSA_SIG_SIZE = 256
 def rsa_keypair(tmp_path):
     """Generate a fresh RSA-2048 keypair for per-file log signing tests.
 
-    Matches the audited reference Section 8: public key on FC encrypts SHA-256 hash,
+    Matches the audited reference scheme: public key on FC encrypts SHA-256 hash,
     manufacturer's private key decrypts for verification.
     """
     private_key = rsa.generate_private_key(
@@ -147,7 +147,7 @@ def _build_log_file(tmp_path, num_entries=3, event_type=1):
 
 
 def _sign_log_file(log_path, public_key):
-    """Sign a log file using RSA public key encryption (the audited reference Section 8 model).
+    """Sign a log file using RSA public key encryption.
 
     FC encrypts SHA-256 hash with public key. Returns 256-byte ciphertext.
     """
@@ -275,12 +275,12 @@ class TestLOG001CRC:
         assert not _verify_crc(bytes(entry))
 
 
-# ── Tests: Per-File RSA Signing (the audited reference Section 8) ─────────────────────────────
+# ── Tests: Per-File RSA Signing ──────────────────────────────────────────
 
 class TestLOG001PerFileRSA:
     """Test per-file RSA-2048 log signing.
 
-    the audited reference Section 8 model:
+    Scheme:
     - FC computes SHA-256 of audit_log.bin
     - Encrypts hash with RSA public key (on FC)
     - Stores 256-byte ciphertext as audit_log.sig

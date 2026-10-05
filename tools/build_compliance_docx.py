@@ -8,7 +8,7 @@ Produces TWO documents:
        Certificate + Architecture + §7.1 Mapping + Annexure E + Build Identity + Test Evidence
   2. Inofly_Firmware_Flashing_SOP.docx  (CB-facing flashing SOP)
        Keys → OpenSSL → signature → upload → connection diagram → bootloader/firmware
-       flashing → GCS flow → §7.1 testing tables. Mirrors the the audited reference reference SOP.
+       flashing → GCS flow → §7.1 testing tables. Mirrors the reference SOP structure.
 
 (The internal Testing & Operations SOP was retired 2026-07-28; its Markdown sources
  — TOOLS_REFERENCE.md, PRODUCTION_KEY_PROVISIONING.md, AUDIT_DEMO_SCRIPT.md — remain
