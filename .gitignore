@@ -83,6 +83,11 @@ Docs/Secure Flight Module (FM) and Tracking mechanism.xlsx
 # =============================================================
 Docs/*.pdf
 Docs/Security Requirements.docx
+# Exception: our own customer-facing brochure is written for publication, so
+# it is tracked explicitly. The blanket Docs/*.pdf deny above still protects
+# the third-party reference PDFs — add new allows one file at a time, never by
+# relaxing the deny.
+!Docs/Inofly_Secure_Firmware_Brochure.pdf
 
 # =============================================================
 # Local / personal helper scripts (not part of the project)
@@ -134,3 +139,17 @@ tests/output/
 # locally, but workspace.json / cache churn on every pane change — none of it
 # belongs in a compliance repo's history.
 .obsidian/
+
+# =============================================================
+# Confidential / working-tree-only (never publish)
+# =============================================================
+# These are untracked by intent, but were not matched by any rule above —
+# a stray `git add .` would have staged them. The repo is public, so the
+# rules are explicit rather than relying on discipline.
+#
+# secrets_manifest.txt is the SHA-256 inventory of material that must stay
+# out of history (third-party audit PDFs, Token.txt, the private key). It
+# names those paths, so it stays local too.
+secrets_manifest.txt
+MIGRATION_HANDOFF.md
+Docs/OWN_FIRMWARE_FEASIBILITY.md
